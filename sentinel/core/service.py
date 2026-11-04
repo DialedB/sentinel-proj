@@ -15,6 +15,10 @@ from sentinel.common.models import ServiceInfo, ServiceRole, ServiceStatus
 from sentinel.common.transport import Health, Heartbeat, RegisteredService, Registration
 from sentinel.server.registry import ServiceRegistry
 
+from sentinel.watchdog.models import CheckResult
+from sentinel.watchdog.monitor import Monitor
+from sentinel.watchdog.strategies import HeartbeatHealthCheckStrategy, HTTPHealthCheckStrategy
+
 logger = logging.getLogger(__name__)
 
 
@@ -155,5 +159,48 @@ class WorkerService(BaseService):
 
 
 class WatchdogService(BaseService):
+    def __init__(self, config: ServiceConfig) -> None:
+        super().__init__(config)
+        self.monitor: Monitor | None = None
+
+    def create_app(self) -> FastAPI:
+        app = super().create_app()
+
+        @app.get("/status", response_model=list[CheckResult])
+        async def statuses() -> list[CheckResult]:
+            return self.monitor.snapshot() if self.monitor else []
+
+        @app.get("/status/{service_id}", response_model=CheckResult)
+        async def status(service_id: str) -> CheckResult:
+            for result in self.monitor.snapshot() if self.monitor else []:
+                if result.service_id == service_id:
+                    return result
+            raise HTTPException(status_code=404, detail="Unknown service ID")
+
+        return app
+
+    @asynccontextmanager
+    async def _lifespan(self, app: FastAPI) -> AsyncIterator[None]:
+        logger.info("Starting watchdog service_id=%s", self.service_id)
+        try:
+            async with httpx.AsyncClient(timeout=self.config.health_check_timeout) as client:
+                strategy = (
+                    HeartbeatHealthCheckStrategy(self.config.heartbeat_timeout)
+                    if self.config.health_check_strategy == "heartbeat"
+                    else HTTPHealthCheckStrategy(client, self.config.health_check_timeout)
+                )
+                self.monitor = Monitor(self.config, client, strategy)
+                task = asyncio.create_task(self.monitor.run(), name=f"monitor-{self.service_id}")
+                self.status = ServiceStatus.HEALTHY
+                try:
+                    yield
+                finally:
+                    task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await task
+        finally:
+            self.status = ServiceStatus.STOPPED
+            logger.info("Shutdown complete service_id=%s", self.service_id)
+
     def run(self) -> None:
         raise NotImplementedError("Watchdog execution is not implemented yet")
