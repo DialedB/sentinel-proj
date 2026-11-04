@@ -37,50 +37,50 @@ services:
       - "127.0.0.1:8000:8000"
     healthcheck: *healthcheck
 
-  producer1:
+  producer-1:
     <<: *service
     command: [python, -m, sentinel.producer.main]
     environment:
       <<: *environment
-      SERVICE_ID: producer1
+      SERVICE_ID: producer-1
       SERVICE_ROLE: producer
-      SERVICE_ADVERTISE_HOST: producer1
+      SERVICE_ADVERTISE_HOST: producer-1
     depends_on:
       main-server:
         condition: service_healthy
 
-  producer2:
+  producer-2:
     <<: *service
     command: [python, -m, sentinel.producer.main]
     environment:
       <<: *environment
-      SERVICE_ID: producer2
+      SERVICE_ID: producer-2
       SERVICE_ROLE: producer
-      SERVICE_ADVERTISE_HOST: producer2
+      SERVICE_ADVERTISE_HOST: producer-2
     depends_on:
       main-server:
         condition: service_healthy
 
-  worker1:
+  worker-1:
     <<: *service
     command: [python, -m, sentinel.worker.main]
     environment:
       <<: *environment
-      SERVICE_ID: worker1
+      SERVICE_ID: worker-1
       SERVICE_ROLE: worker
-      SERVICE_ADVERTISE_HOST: worker1
+      SERVICE_ADVERTISE_HOST: worker-1
     depends_on:
       main-server:
         condition: service_healthy
 
-  worker2:
+  worker-2:
     <<: *service
     command: [python, -m, sentinel.worker.main]
     environment:
       <<: *environment
-      SERVICE_ID: worker2
+      SERVICE_ID: worker-2
       SERVICE_ROLE: worker
-      SERVICE_ADVERTISE_HOST: worker2
+      SERVICE_ADVERTISE_HOST: worker-2
     depends_on:
       main-server:
         condition: service_healthy

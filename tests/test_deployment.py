@@ -17,8 +17,8 @@ from sentinel.core.factory import ProducerFactory, WorkerFactory
 class DeploymentTests(unittest.IsolatedAsyncioTestCase):
     def config(self):
         return ServiceConfig.from_env(ServiceRole.WORKER, {
-            "SERVICE_ID": "worker1", "SERVICE_HOST": "0.0.0.0",
-            "SERVICE_PORT": "8000", "SERVICE_ADVERTISE_HOST": "worker1",
+            "SERVICE_ID": "worker-1", "SERVICE_HOST": "0.0.0.0",
+            "SERVICE_PORT": "8000", "SERVICE_ADVERTISE_HOST": "worker-1",
             "MAIN_SERVER_URL": "http://main-server:8000",
         })
 
@@ -27,18 +27,18 @@ class DeploymentTests(unittest.IsolatedAsyncioTestCase):
                             "http://central", 1, 2, "central", 3, 4, 5, "http")
         self.assertIsNone(old.advertise_host)
         self.assertEqual(old.advertised_host, "localhost")
-        for invalid in ("", " ", "bad host", "http://worker1", "w/path",
+        for invalid in ("", " ", "bad host", "http://worker-1", "w/path",
                         "w?query", "w#fragment", "user@host", 123, False):
             with self.subTest(invalid=invalid), self.assertRaises(ValueError):
                 replace(old, advertise_host=invalid)
-        for valid in ("worker1", "127.0.0.1", "::1"):
+        for valid in ("worker-1", "127.0.0.1", "::1"):
             self.assertEqual(replace(old, advertise_host=valid).advertised_host, valid)
         with self.assertRaises(ValueError):
             ServiceConfig.from_env(ServiceRole.WORKER, {"SERVICE_ADVERTISE_HOST": ""})
 
     def test_entrypoint_binds_wildcard_but_info_advertises_dns(self):
         config = self.config()
-        self.assertEqual(WorkerFactory().create_service(config).get_info().host, "worker1")
+        self.assertEqual(WorkerFactory().create_service(config).get_info().host, "worker-1")
         with patch("sentinel.core.entrypoint.ServiceConfig.from_env", return_value=config):
             with patch("sentinel.core.entrypoint.uvicorn.run") as run:
                 serve(WorkerFactory(), ServiceRole.WORKER)
@@ -63,6 +63,6 @@ class DeploymentTests(unittest.IsolatedAsyncioTestCase):
             with patch("sentinel.common.http_client.httpx.AsyncClient", return_value=client):
                 async with app.router.lifespan_context(app):
                     await asyncio.wait_for(sent.wait(), 1)
-            self.assertEqual(payloads, [{"service_id": "worker1", "role": role.value,
-                                        "host": "worker1", "port": 8000}])
+            self.assertEqual(payloads, [{"service_id": "worker-1", "role": role.value,
+                                        "host": "worker-1", "port": 8000}])
             self.assertTrue(client.is_closed)

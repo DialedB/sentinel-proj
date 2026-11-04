@@ -9,8 +9,8 @@ from urllib.error import URLError
 from urllib.request import urlopen
 
 
-EXPECTED = {"producer1": "producer", "producer2": "producer",
-            "worker1": "worker", "worker2": "worker"}
+EXPECTED = {"producer-1": "producer", "producer-2": "producer",
+            "worker-1": "worker", "worker-2": "worker"}
 
 
 def get(url, timeout):

@@ -39,8 +39,8 @@ curl --fail --max-time 3 http://127.0.0.1:8000/health
 curl --fail --max-time 3 http://127.0.0.1:8000/services
 curl --fail --max-time 3 http://127.0.0.1:8005/health
 curl --fail --max-time 3 http://127.0.0.1:8005/status
-curl --fail --max-time 3 http://127.0.0.1:8005/status/worker1
-docker compose logs --tail 100 main-server watchdog worker1
+curl --fail --max-time 3 http://127.0.0.1:8005/status/worker-1
+docker compose logs --tail 100 main-server watchdog worker-1
 ```
 
 All six services use the same `sentinel:phase4` image built from `python:3.12-slim`.
@@ -54,8 +54,8 @@ to Docker Hub and PyPI; dependencies use compatible ranges, not a reproducible l
 | Compose service / ID | Role | Internal listen / advertised address |
 | --- | --- | --- |
 | `main-server` | server | `0.0.0.0:8000` / `main-server:8000` |
-| `producer1`, `producer2` | producer | `0.0.0.0:8000` / respective DNS name, port 8000 |
-| `worker1`, `worker2` | worker | `0.0.0.0:8000` / respective DNS name, port 8000 |
+| `producer-1`, `producer-2` | producer | `0.0.0.0:8000` / respective DNS name, port 8000 |
+| `worker-1`, `worker-2` | worker | `0.0.0.0:8000` / respective DNS name, port 8000 |
 | `watchdog` | watchdog | `0.0.0.0:8000` / `watchdog:8000` |
 
 Communication is HTTP over Docker DNS on the named bridge `sentinel-network`;
@@ -64,8 +64,9 @@ This is an isolated application network, not an authentication or egress securit
 boundary. Only central and watchdog publish ports, bound to host loopback at
 `127.0.0.1:8000` and `127.0.0.1:8005`. Producers/workers are reachable inside the
 network only. No Docker socket, volumes, or restart policies are configured.
-The local instructions below deliberately retain `server-1`, `producer-1`, etc.;
-Compose uses `main-server`, `producer1`, etc. Do not mix these identities.
+The local instructions below retain central ID `server-1`; Compose uses
+`main-server`. Both workflows use `producer-1`, `producer-2`, `worker-1`, and
+`worker-2`. Use the central identity appropriate to the chosen workflow.
 
 Central and watchdog have stdlib `/health` healthchecks (2s HTTP timeout, 3s
 process timeout, 5s intervals, 5s startup grace, five retries). Their healthchecks
@@ -91,19 +92,19 @@ monitoring cycles (normally 5–15 seconds; requests are sequential and timeout-
 Use repeated bounded curl requests rather than assuming an immediate transition:
 
 ```bash
-docker compose stop --timeout 10 worker1
-curl --fail --max-time 3 http://127.0.0.1:8005/status/worker1
-docker compose start worker1
+docker compose stop --timeout 10 worker-1
+curl --fail --max-time 3 http://127.0.0.1:8005/status/worker-1
+docker compose start worker-1
 python3 tests/smoke_deployment.py --timeout 60
 docker compose stop --timeout 10 main-server
 curl --fail --max-time 3 http://127.0.0.1:8005/health
 curl --fail --max-time 3 http://127.0.0.1:8005/status
 docker compose start main-server
 python3 tests/smoke_deployment.py --timeout 60
-docker compose logs --tail 100 watchdog main-server worker1
+docker compose logs --tail 100 watchdog main-server worker-1
 ```
 
-While worker1 is stopped, its watchdog status becomes `unhealthy`; the other four
+While worker-1 is stopped, its watchdog status becomes `unhealthy`; the other four
 observations stay healthy. Starting it with the same ID restores health without
 restarting the watchdog. While central is stopped, the watchdog API stays reachable,
 `main-server` becomes unhealthy, and all five known observations remain. Discovery

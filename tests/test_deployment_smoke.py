@@ -13,9 +13,15 @@ class SmokeTests(unittest.TestCase):
                 for identity, role in expected.items()]
 
     def test_exact_identities_roles_health_and_discovery(self):
+        self.assertEqual(smoke.EXPECTED, {
+            "producer-1": "producer", "producer-2": "producer",
+            "worker-1": "worker", "worker-2": "worker",
+        })
         good = self.rows(smoke.EXPECTED)
         smoke.validate(good, smoke.EXPECTED, True)
         for bad in (good[:-1], good + [good[0]],
+                    [{**row, "service_id": row["service_id"].replace("-", "")}
+                     for row in good],
                     [{**row, "role": "server"} for row in good],
                     [{**row, "status": "unhealthy"} for row in good],
                     [{**row, "discoverable": False} for row in good],
