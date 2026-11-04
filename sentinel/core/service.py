@@ -12,12 +12,19 @@ from fastapi import FastAPI, HTTPException
 from sentinel.common.config import ServiceConfig
 from sentinel.common.http_client import ServiceHTTPClient
 from sentinel.common.models import ServiceInfo, ServiceRole, ServiceStatus
-from sentinel.common.transport import Health, Heartbeat, RegisteredService, Registration
+from sentinel.common.transport import (
+    Health,
+    Heartbeat,
+    RegisteredService,
+    Registration,
+)
 from sentinel.server.registry import ServiceRegistry
-
 from sentinel.watchdog.models import CheckResult
-from sentinel.watchdog.monitor import Monitor
-from sentinel.watchdog.strategies import HeartbeatHealthCheckStrategy, HTTPHealthCheckStrategy
+from sentinel.watchdog.monitor import ServiceMonitor
+from sentinel.watchdog.strategies import (
+    HeartbeatHealthCheckStrategy,
+    HTTPHealthCheckStrategy,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +64,9 @@ class BaseService(ABC):
 
     @asynccontextmanager
     async def _lifespan(self, app: FastAPI) -> AsyncIterator[None]:
-        logger.info("Starting %s service_id=%s", self.role.value, self.service_id)
+        logger.info(
+            "Starting %s service_id=%s", self.role.value, self.service_id,
+        )
         self.status = ServiceStatus.HEALTHY
         try:
             if self.role in (ServiceRole.PRODUCER, ServiceRole.WORKER):
@@ -65,7 +74,8 @@ class BaseService(ABC):
                     self.config.server_url, self.config.http_timeout,
                 ) as client:
                     task = asyncio.create_task(
-                        self._communicate(client), name=f"heartbeat-{self.service_id}",
+                        self._communicate(client),
+                        name=f"heartbeat-{self.service_id}",
                     )
                     try:
                         yield
@@ -134,7 +144,9 @@ class ServerService(BaseService):
             try:
                 record = self.registry.heartbeat(payload.service_id)
             except KeyError as error:
-                raise HTTPException(status_code=404, detail="Unknown service ID") from error
+                raise HTTPException(
+                    status_code=404, detail="Unknown service ID",
+                ) from error
             logger.debug("Heartbeat service_id=%s", payload.service_id)
             return record
 
@@ -161,7 +173,7 @@ class WorkerService(BaseService):
 class WatchdogService(BaseService):
     def __init__(self, config: ServiceConfig) -> None:
         super().__init__(config)
-        self.monitor: Monitor | None = None
+        self.monitor: ServiceMonitor | None = None
 
     def create_app(self) -> FastAPI:
         app = super().create_app()
@@ -183,14 +195,20 @@ class WatchdogService(BaseService):
     async def _lifespan(self, app: FastAPI) -> AsyncIterator[None]:
         logger.info("Starting watchdog service_id=%s", self.service_id)
         try:
-            async with httpx.AsyncClient(timeout=self.config.health_check_timeout) as client:
+            async with httpx.AsyncClient(
+                timeout=self.config.health_check_timeout,
+            ) as client:
                 strategy = (
                     HeartbeatHealthCheckStrategy(self.config.heartbeat_timeout)
                     if self.config.health_check_strategy == "heartbeat"
-                    else HTTPHealthCheckStrategy(client, self.config.health_check_timeout)
+                    else HTTPHealthCheckStrategy(
+                        client, self.config.health_check_timeout,
+                    )
                 )
-                self.monitor = Monitor(self.config, client, strategy)
-                task = asyncio.create_task(self.monitor.run(), name=f"monitor-{self.service_id}")
+                self.monitor = ServiceMonitor(self.config, client, strategy)
+                task = asyncio.create_task(
+                    self.monitor.run(), name=f"monitor-{self.service_id}",
+                )
                 self.status = ServiceStatus.HEALTHY
                 try:
                     yield

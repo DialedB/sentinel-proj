@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 from datetime import datetime
 
-from sentinel.common.models import ServiceRole
+from sentinel.common.models import ServiceRole, ServiceStatus
 
 
 @dataclass(frozen=True)
@@ -18,7 +18,7 @@ class MonitoredService:
 class CheckResult:
     service_id: str
     role: ServiceRole
-    status: str | None = None
+    status: ServiceStatus | None = None
     last_checked: datetime | None = None
     last_successful: datetime | None = None
     error: str | None = None

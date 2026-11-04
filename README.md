@@ -133,15 +133,18 @@ restart, producers/workers re-register and monitoring recovers automatically.
 - `server/registry.py`: lock-protected in-memory registry.
 - `core/factory.py`: existing Factory Method creators; construction has no I/O.
 - `core/service.py`: `create_app()`, APIs and lifespan ownership. WatchdogService
-  composes a monitor rather than replacing the factory or Phase 1 class.
+  composes a `ServiceMonitor` rather than replacing the factory or Phase 1 class.
 - `core/entrypoint.py` and role `main.py`: factory-driven uvicorn entrypoints.
 - `watchdog/strategies.py`: async Strategy ABC and HTTP/heartbeat policies.
-- `watchdog/monitor.py`, `models.py`: discovery, retained targets, frozen results.
+- `watchdog/monitor.py`: `ServiceMonitor` with constructor-injected strategy,
+  discovery, and retained targets; `models.py`: frozen, `ServiceStatus`-typed results.
 
 Watchdog discovery and HTTP checks share one reusable lifespan-scoped AsyncClient.
 Checks are sequential asynchronous requests in a background task, never performed
 by status API handlers. Each service exception is logged and checking continues;
-outer loop failures are logged and retried. Cancellation propagates. Shutdown
+outer loop failures are logged and retried. INFO transition logs are emitted only
+when status changes, including initial checks (`UNCHECKED`) and recovery, e.g.
+`[WATCHDOG] worker-1 HEALTHY -> UNHEALTHY`. Cancellation propagates. Shutdown
 cancels and awaits the task **before** closing its client. All original `run()`
 methods deliberately still raise `NotImplementedError` for Phase 1 compatibility.
 

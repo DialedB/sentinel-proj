@@ -3,7 +3,6 @@
 import math
 import os
 from collections.abc import Mapping
-
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
@@ -35,13 +34,24 @@ class ServiceConfig:
             raise ValueError("Unsupported service role")
         configured_role = ServiceRole(env.get("SERVICE_ROLE", role.value))
         if configured_role is not role:
-            raise ValueError(f"SERVICE_ROLE must be {role.value} for this entrypoint")
-        ports = {ServiceRole.SERVER: 8000, ServiceRole.PRODUCER: 8001,
-                 ServiceRole.WORKER: 8002, ServiceRole.WATCHDOG: 8005}
+            raise ValueError(
+                f"SERVICE_ROLE must be {role.value} for this entrypoint",
+            )
+        ports = {
+            ServiceRole.SERVER: 8000,
+            ServiceRole.PRODUCER: 8001,
+            ServiceRole.WORKER: 8002,
+            ServiceRole.WATCHDOG: 8005,
+        }
+        default_host = "127.0.0.1"
+        default_port = str(ports[role])
+        if role is ServiceRole.WATCHDOG:
+            default_host = env.get("WATCHDOG_HOST", default_host)
+            default_port = env.get("WATCHDOG_PORT", default_port)
         return cls(
             env.get("SERVICE_ID", f"{role.value}-1"), configured_role,
-            env.get("SERVICE_HOST", env.get("WATCHDOG_HOST", "127.0.0.1") if role is ServiceRole.WATCHDOG else "127.0.0.1"),
-            int(env.get("SERVICE_PORT", env.get("WATCHDOG_PORT", "8005") if role is ServiceRole.WATCHDOG else str(ports[role]))),
+            env.get("SERVICE_HOST", default_host),
+            int(env.get("SERVICE_PORT", default_port)),
             env.get("MAIN_SERVER_URL", "http://127.0.0.1:8000"),
             float(env.get("HEARTBEAT_INTERVAL", "5")),
             float(env.get("HTTP_TIMEOUT", "5")),
@@ -64,8 +74,13 @@ class ServiceConfig:
         if any(char.isspace() for char in self.host) or any(
             char in self.host for char in "/?#@"
         ) or "://" in self.host:
-            raise ValueError("host must be a hostname or IP address, not a URL")
-        for name in ("heartbeat_interval", "http_timeout", "monitor_interval", "health_check_timeout", "heartbeat_timeout"):
+            raise ValueError(
+                "host must be a hostname or IP address, not a URL",
+            )
+        for name in (
+            "heartbeat_interval", "http_timeout", "monitor_interval",
+            "health_check_timeout", "heartbeat_timeout",
+        ):
             value = getattr(self, name)
             if (isinstance(value, bool) or not isinstance(value, (int, float))
                     or not math.isfinite(value) or value <= 0):
@@ -81,6 +96,8 @@ class ServiceConfig:
                 and (url.port is None or 1 <= url.port <= 65535)
             )
         except ValueError as error:
-            raise ValueError("server_url must be a valid HTTP(S) URL") from error
+            raise ValueError(
+                "server_url must be a valid HTTP(S) URL",
+            ) from error
         if not valid:
             raise ValueError("server_url must be a valid HTTP(S) URL")
