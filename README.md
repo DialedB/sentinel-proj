@@ -43,26 +43,29 @@ is frozen and retains its original five positional arguments (`service_id`,
 | Variable | Default | Validation / purpose |
 | --- | --- | --- |
 | `SERVICE_ID` | `server-1`, `producer-1`, or `worker-1` | Nonblank stable identity; choose a unique ID per concurrent service |
-| `ROLE` | Entry module's role | Must match `server`, `producer`, or `worker` entrypoint |
-| `HOST` | `127.0.0.1` | Nonblank hostname/IP, not a URL; bind and advertised registration host |
-| `PORT` | 8000 / 8001 / 8002 respectively | Integer 1–65535 |
+| `SERVICE_ROLE` | Entry module's role | Must match `server`, `producer`, or `worker` entrypoint |
+| `SERVICE_HOST` | `127.0.0.1` | Nonblank hostname/IP, not a URL; bind and advertised registration host |
+| `SERVICE_PORT` | 8000 / 8001 / 8002 respectively | Integer 1–65535 |
 | `MAIN_SERVER_URL` | `http://127.0.0.1:8000` | Valid HTTP(S) central URL |
 | `HEARTBEAT_INTERVAL` | `5` | Finite positive seconds; also registration retry delay |
 | `HTTP_TIMEOUT` | `5` | Finite positive seconds; httpx request timeout |
 
+Use the canonical `SERVICE_ROLE`, `SERVICE_HOST`, and `SERVICE_PORT` names;
+legacy unprefixed environment variables are not read.
+
 For additional instances, set **both** a unique ID and unused port:
 
 ```bash
-SERVICE_ID=producer-2 PORT=8011 python -m sentinel.producer.main
-SERVICE_ID=worker-2 PORT=8012 python -m sentinel.worker.main
-SERVICE_ID=worker-remote PORT=8013 MAIN_SERVER_URL=http://127.0.0.1:8000 HEARTBEAT_INTERVAL=2 HTTP_TIMEOUT=3 python -m sentinel.worker.main
+SERVICE_ID=producer-2 SERVICE_PORT=8011 python -m sentinel.producer.main
+SERVICE_ID=worker-2 SERVICE_PORT=8012 python -m sentinel.worker.main
+SERVICE_ID=worker-remote SERVICE_PORT=8013 MAIN_SERVER_URL=http://127.0.0.1:8000 HEARTBEAT_INTERVAL=2 HTTP_TIMEOUT=3 python -m sentinel.worker.main
 ```
 
 The default IDs are deterministic, not random. Reusing an ID intentionally
 replaces the existing registry record, even if its role/address changes. Restart
-with the same `SERVICE_ID` to retain identity. `HOST=0.0.0.0` binds all interfaces
-but is not a useful address for remote clients; choose an appropriate interface
-address for network use. This phase has no separate advertised-host setting.
+with the same `SERVICE_ID` to retain identity. `SERVICE_HOST=0.0.0.0` binds all
+interfaces but is not a useful address for remote clients; choose an appropriate
+interface address for network use. This phase has no separate advertised-host setting.
 
 ## HTTP API and verification
 
@@ -95,15 +98,18 @@ Malformed/missing payloads, unsupported registration roles, extra fields,
 blank identities, and invalid ports return 422. A lock protects every registry
 operation; returned records are independent, immutable snapshots.
 
-Registration success, startup, registration failures, and shutdown are logged
-with IDs; heartbeat details are DEBUG-level messages. Default application logging
-is INFO. Uvicorn also emits HTTP access logs.
+Registration success, startup, and shutdown are logged with IDs. Registration
+and heartbeat failures are WARNING-level messages, visible with the default INFO
+logging; successful heartbeat details are DEBUG-level messages. Uvicorn also
+emits HTTP access logs.
 
 ## Architecture and compatibility
 
 - `sentinel/common/config.py`: immutable configuration and environment loading.
 - `sentinel/common/models.py`: original Phase 1 role/status enums and snapshots.
 - `sentinel/common/transport.py`: Pydantic HTTP request/response contracts.
+- `sentinel/common/http_client.py`: reusable async context-managed registration
+  and heartbeat transport; HTTP errors propagate to the service for recovery.
 - `sentinel/server/registry.py`: lock-protected, in-memory registry.
 - `sentinel/core/service.py`: shared ASGI lifespan, health, communication loop,
   and central routes.
@@ -124,7 +130,8 @@ python tests/smoke_communication.py
 ```
 
 Unit tests cover Phase 1 compatibility, registry concurrency and snapshots,
-API validation, configuration, mocked connection/HTTP failures, re-registration,
+API validation, canonical environment configuration, mocked client methods,
+connection/timeouts and HTTP failures, warning logs, re-registration,
 nonblocking health, and cancellation/client cleanup. No network is needed for
 unit tests.
 

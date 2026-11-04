@@ -27,14 +27,15 @@ class ServiceConfig:
         env = os.environ if environ is None else environ
         if role not in (ServiceRole.SERVER, ServiceRole.PRODUCER, ServiceRole.WORKER):
             raise ValueError("Only server, producer and worker entrypoints are supported")
-        configured_role = ServiceRole(env.get("ROLE", role.value))
+        configured_role = ServiceRole(env.get("SERVICE_ROLE", role.value))
         if configured_role is not role:
-            raise ValueError(f"ROLE must be {role.value} for this entrypoint")
+            raise ValueError(f"SERVICE_ROLE must be {role.value} for this entrypoint")
         ports = {ServiceRole.SERVER: 8000, ServiceRole.PRODUCER: 8001,
                  ServiceRole.WORKER: 8002}
         return cls(
             env.get("SERVICE_ID", f"{role.value}-1"), configured_role,
-            env.get("HOST", "127.0.0.1"), int(env.get("PORT", str(ports[role]))),
+            env.get("SERVICE_HOST", "127.0.0.1"),
+            int(env.get("SERVICE_PORT", str(ports[role]))),
             env.get("MAIN_SERVER_URL", "http://127.0.0.1:8000"),
             float(env.get("HEARTBEAT_INTERVAL", "5")),
             float(env.get("HTTP_TIMEOUT", "5")),

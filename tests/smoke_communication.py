@@ -44,8 +44,8 @@ def main():
     with tempfile.TemporaryDirectory(prefix="sentinel-smoke-") as directory:
         def start(role, generation=""):
             log = open(Path(directory) / f"{role}{generation}.log", "w+")
-            env = {**os.environ, "SERVICE_ID": f"smoke-{role}", "ROLE": role,
-                   "HOST": "127.0.0.1", "PORT": str({"server": 8000,
+            env = {**os.environ, "SERVICE_ID": f"smoke-{role}", "SERVICE_ROLE": role,
+                   "SERVICE_HOST": "127.0.0.1", "SERVICE_PORT": str({"server": 8000,
                    "producer": 8001, "worker": 8002}[role]),
                    "MAIN_SERVER_URL": "http://127.0.0.1:8000",
                    "HEARTBEAT_INTERVAL": "0.2", "HTTP_TIMEOUT": "0.3"}

@@ -5,13 +5,14 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import FrozenInstanceError, replace
 from datetime import datetime, timedelta
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import httpx
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from sentinel.common.config import ServiceConfig
+from sentinel.common.http_client import ServiceHTTPClient
 from sentinel.common.models import ServiceRole, ServiceStatus
 from sentinel.common.transport import Registration
 from sentinel.core.factory import ProducerFactory, ServerFactory, WorkerFactory
@@ -105,7 +106,8 @@ class ConfigurationTests(unittest.TestCase):
             self.assertEqual(loaded.http_timeout, 5)
             self.assertEqual(loaded.service_id, role.value + "-1")
         loaded = ServiceConfig.from_env(ServiceRole.WORKER, {
-            "SERVICE_ID": "w2", "ROLE": "worker", "HOST": "0.0.0.0", "PORT": "9002",
+            "SERVICE_ID": "w2", "SERVICE_ROLE": "worker",
+            "SERVICE_HOST": "0.0.0.0", "SERVICE_PORT": "9002",
             "MAIN_SERVER_URL": "https://central:8443", "HEARTBEAT_INTERVAL": "2",
             "HTTP_TIMEOUT": "3"})
         self.assertEqual(loaded, ServiceConfig("w2", ServiceRole.WORKER,
@@ -113,11 +115,19 @@ class ConfigurationTests(unittest.TestCase):
         with self.assertRaises(FrozenInstanceError):
             loaded.port = 1
 
+    def test_unprefixed_environment_variables_are_not_configuration(self):
+        loaded = ServiceConfig.from_env(ServiceRole.WORKER, {
+            "ROLE": "server", "HOST": "bad host", "PORT": "invalid",
+        })
+        self.assertEqual(loaded.role, ServiceRole.WORKER)
+        self.assertEqual(loaded.host, "127.0.0.1")
+        self.assertEqual(loaded.port, 8002)
+
     def test_invalid_environment_and_timing(self):
         for key, values in {
-            "ROLE": ["server", "bad", ""], "SERVICE_ID": ["", " "],
-            "HOST": ["", "bad host", "http://localhost"],
-            "PORT": ["0", "65536", "nan", "1.5"],
+            "SERVICE_ROLE": ["server", "bad", ""], "SERVICE_ID": ["", " "],
+            "SERVICE_HOST": ["", "bad host", "http://localhost"],
+            "SERVICE_PORT": ["0", "65536", "nan", "1.5"],
             "MAIN_SERVER_URL": ["bad", "ftp://host"],
             "HEARTBEAT_INTERVAL": ["0", "-1", "nan", "inf", "bad"],
             "HTTP_TIMEOUT": ["0", "-1", "nan", "inf", "bad"],
@@ -132,6 +142,47 @@ class ConfigurationTests(unittest.TestCase):
 
 
 class LifecycleTests(unittest.IsolatedAsyncioTestCase):
+    async def test_mock_client_methods_retry_and_reregister(self):
+        client = AsyncMock(spec=ServiceHTTPClient)
+        completed = asyncio.Event()
+        request = httpx.Request("POST", "http://central/heartbeat")
+        unknown = httpx.Response(404, request=request)
+        client.register.side_effect = [httpx.ConnectTimeout("offline"), None, None]
+        heartbeat_errors = iter([
+            httpx.ConnectError("connection lost"),
+            httpx.ReadTimeout("heartbeat timed out"),
+            httpx.HTTPStatusError("unknown service", request=request, response=unknown),
+            None,
+        ])
+        async def heartbeat(service_id):
+            self.assertEqual(service_id, "test-1")
+            error = next(heartbeat_errors)
+            if error is not None:
+                raise error
+            completed.set()
+        client.heartbeat.side_effect = heartbeat
+        service = ProducerFactory().create_service(config())
+        app = service.create_app()
+        with patch("sentinel.core.service.ServiceHTTPClient", autospec=True) as constructor:
+            context = constructor.return_value
+            context.__aenter__.return_value = client
+            with self.assertLogs("sentinel.core.service", level="WARNING") as logs:
+                async with app.router.lifespan_context(app):
+                    await asyncio.wait_for(completed.wait(), 1)
+            constructor.assert_called_once_with("http://central:8000", 0.1)
+            context.__aenter__.assert_awaited_once()
+            context.__aexit__.assert_awaited_once_with(None, None, None)
+        self.assertEqual(client.register.await_count, 3)
+        for call in client.register.await_args_list:
+            self.assertEqual(call.args[0], Registration(
+                service_id="test-1", role=ServiceRole.PRODUCER,
+                host="127.0.0.1", port=8001))
+        self.assertEqual(client.heartbeat.await_count, 4)
+        self.assertEqual(sum("Registration failed" in line for line in logs.output), 1)
+        self.assertEqual(sum("Heartbeat failed" in line for line in logs.output), 3)
+        self.assertTrue(all("WARNING" in line and "test-1" in line for line in logs.output))
+        self.assertEqual(service.status, ServiceStatus.STOPPED)
+
     async def test_retry_unknown_reregistration_health_and_client_close(self):
         for factory in (ProducerFactory, WorkerFactory):
             role = ServiceRole.PRODUCER if factory is ProducerFactory else ServiceRole.WORKER
@@ -152,7 +203,7 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
             client = httpx.AsyncClient(transport=httpx.MockTransport(handler),
                                       base_url="http://central:8000/")
             app = service.create_app()
-            with patch("sentinel.core.service.httpx.AsyncClient", return_value=client) as constructor:
+            with patch("sentinel.common.http_client.httpx.AsyncClient", return_value=client) as constructor:
                 with self.assertLogs("sentinel.core.service", level="DEBUG") as logs:
                     async with app.router.lifespan_context(app):
                         self.assertEqual(service.status, ServiceStatus.HEALTHY)
@@ -183,9 +234,13 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
                                   base_url="http://central/")
         service = ProducerFactory().create_service(config())
         app = service.create_app()
-        with patch("sentinel.core.service.httpx.AsyncClient", return_value=client):
-            async with app.router.lifespan_context(app):
-                await asyncio.wait_for(completed.wait(), 1)
+        with patch("sentinel.common.http_client.httpx.AsyncClient", return_value=client):
+            with self.assertLogs("sentinel.core.service", level="WARNING") as logs:
+                async with app.router.lifespan_context(app):
+                    await asyncio.wait_for(completed.wait(), 1)
+            self.assertEqual(len(logs.output), 2)
+            self.assertTrue(all("WARNING" in line and "Heartbeat failed" in line
+                                and "test-1" in line for line in logs.output))
         self.assertEqual(calls[:4], ["/register", "/heartbeat", "/heartbeat", "/heartbeat"])
         self.assertTrue(client.is_closed)
 
@@ -201,7 +256,7 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
                                   base_url="http://central/")
         service = ProducerFactory().create_service(config())
         app = service.create_app()
-        with patch("sentinel.core.service.httpx.AsyncClient", return_value=client):
+        with patch("sentinel.common.http_client.httpx.AsyncClient", return_value=client):
             async with app.router.lifespan_context(app):
                 await asyncio.wait_for(entered.wait(), 1)
             self.assertTrue(cancelled.is_set())
@@ -221,7 +276,7 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
         app = service.create_app()
         health_client = httpx.AsyncClient(transport=httpx.ASGITransport(app),
                                          base_url="http://worker")
-        with patch("sentinel.core.service.httpx.AsyncClient", return_value=client):
+        with patch("sentinel.common.http_client.httpx.AsyncClient", return_value=client):
             async with app.router.lifespan_context(app):
                 await asyncio.wait_for(entered.wait(), 1)
                 async with health_client:

@@ -3,12 +3,14 @@
 import asyncio
 import logging
 from abc import ABC, abstractmethod
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 
 import httpx
 from fastapi import FastAPI, HTTPException
 
 from sentinel.common.config import ServiceConfig
+from sentinel.common.http_client import ServiceHTTPClient
 from sentinel.common.models import ServiceInfo, ServiceRole, ServiceStatus
 from sentinel.common.transport import Health, Heartbeat, RegisteredService, Registration
 from sentinel.server.registry import ServiceRegistry
@@ -50,14 +52,13 @@ class BaseService(ABC):
         return app
 
     @asynccontextmanager
-    async def _lifespan(self, app: FastAPI):
+    async def _lifespan(self, app: FastAPI) -> AsyncIterator[None]:
         logger.info("Starting %s service_id=%s", self.role.value, self.service_id)
         self.status = ServiceStatus.HEALTHY
         try:
             if self.role in (ServiceRole.PRODUCER, ServiceRole.WORKER):
-                async with httpx.AsyncClient(
-                    base_url=self.config.server_url.rstrip("/") + "/",
-                    timeout=self.config.http_timeout,
+                async with ServiceHTTPClient(
+                    self.config.server_url, self.config.http_timeout,
                 ) as client:
                     task = asyncio.create_task(
                         self._communicate(client), name=f"heartbeat-{self.service_id}",
@@ -74,34 +75,29 @@ class BaseService(ABC):
             self.status = ServiceStatus.STOPPED
             logger.info("Shutdown complete service_id=%s", self.service_id)
 
-    async def _communicate(self, client: httpx.AsyncClient) -> None:
+    async def _communicate(self, client: ServiceHTTPClient) -> None:
         registered = False
         registration = Registration(
             service_id=self.service_id, role=self.role,
             host=self.config.host, port=self.config.port,
-        ).model_dump(mode="json")
+        )
         while True:
             try:
                 if not registered:
-                    response = await client.post("register", json=registration)
-                    response.raise_for_status()
+                    await client.register(registration)
                     registered = True
                     logger.info("Registered service_id=%s", self.service_id)
                 else:
-                    response = await client.post(
-                        "heartbeat", json={"service_id": self.service_id},
-                    )
-                    if response.status_code == 404:
-                        registered = False
-                        logger.debug("Unknown heartbeat; re-registering service_id=%s",
-                                     self.service_id)
-                        continue
-                    response.raise_for_status()
+                    await client.heartbeat(self.service_id)
                     logger.debug("Heartbeat service_id=%s", self.service_id)
             except httpx.HTTPError as error:
                 if registered:
-                    logger.debug("Heartbeat failed service_id=%s: %s",
-                                 self.service_id, error)
+                    logger.warning("Heartbeat failed service_id=%s: %s",
+                                   self.service_id, error)
+                    if (isinstance(error, httpx.HTTPStatusError)
+                            and error.response.status_code == 404):
+                        registered = False
+                        continue
                 else:
                     logger.warning("Registration failed service_id=%s: %s",
                                    self.service_id, error)
