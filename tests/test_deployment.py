@@ -11,7 +11,7 @@ import httpx
 from sentinel.common.config import ServiceConfig
 from sentinel.common.models import ServiceRole
 from sentinel.core.entrypoint import serve
-from sentinel.core.factory import WorkerFactory
+from sentinel.core.factory import ProducerFactory, WorkerFactory
 
 
 class DeploymentTests(unittest.IsolatedAsyncioTestCase):
@@ -45,7 +45,8 @@ class DeploymentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(run.call_args.kwargs, {"host": "0.0.0.0", "port": 8000})
 
     async def test_registration_actually_sends_advertised_dns(self):
-        for factory, role in ((WorkerFactory, ServiceRole.WORKER),):
+        for factory, role in ((WorkerFactory, ServiceRole.WORKER),
+                              (ProducerFactory, ServiceRole.PRODUCER)):
             sent = asyncio.Event()
             payloads = []
 
@@ -62,6 +63,6 @@ class DeploymentTests(unittest.IsolatedAsyncioTestCase):
             with patch("sentinel.common.http_client.httpx.AsyncClient", return_value=client):
                 async with app.router.lifespan_context(app):
                     await asyncio.wait_for(sent.wait(), 1)
-            self.assertEqual(payloads, [{"service_id": "worker1", "role": "worker",
+            self.assertEqual(payloads, [{"service_id": "worker1", "role": role.value,
                                         "host": "worker1", "port": 8000}])
             self.assertTrue(client.is_closed)

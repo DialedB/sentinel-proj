@@ -1,7 +1,8 @@
 # Sentinel
 
-Sentinel targets Python 3.12. Phase 3 adds strategy-based watchdog monitoring to
-Phase 2 registration/heartbeats while preserving the Phase 1 Factory Method API.
+Sentinel targets Python 3.12. Phase 4 adds a six-container Docker Compose deployment
+to Phase 3 strategy-based monitoring and Phase 2 registration/heartbeats, preserving
+the Phase 1 Factory Method API. The local-process workflow remains supported.
 
 ## Setup and tests
 
@@ -15,11 +16,117 @@ python -m pip install -r requirements.txt
 ```
 
 Dependencies are FastAPI, httpx, and uvicorn; see `requirements.txt` for ranges.
-Unit tests need no network. Smoke scripts launch bounded independent subprocesses,
+Unit tests need no network. The Phase 2/3 smoke scripts launch bounded independent subprocesses,
 require permission to listen on localhost and free ports 8000–8002 and (for the
 watchdog smoke) 8005. Allow TCP TIME_WAIT to expire before running the unchanged
 Phase 2 smoke immediately after another smoke using the same ports. Every child
 is stopped and awaited in `finally`, with bounded waits and a kill fallback.
+
+## Phase 4: Docker Compose
+
+Requires Docker with a running daemon and Docker Compose v2+ (or compatible v5).
+Do not run the local setup simultaneously: host ports 8000 and 8005 must be free.
+From the repository root:
+
+```bash
+docker version
+docker compose config --quiet
+docker compose build
+docker compose up -d --wait --wait-timeout 90
+docker compose ps
+python3 tests/smoke_deployment.py --timeout 60
+curl --fail --max-time 3 http://127.0.0.1:8000/health
+curl --fail --max-time 3 http://127.0.0.1:8000/services
+curl --fail --max-time 3 http://127.0.0.1:8005/health
+curl --fail --max-time 3 http://127.0.0.1:8005/status
+curl --fail --max-time 3 http://127.0.0.1:8005/status/worker1
+docker compose logs --tail 100 main-server watchdog worker1
+```
+
+All six services use the same `sentinel:phase4` image built from `python:3.12-slim`.
+The image installs only `requirements.txt`, copies the application, runs unbuffered
+as UID/GID 10001, and starts Python directly (exec-form Compose commands, no shell,
+reload, or extra uvicorn workers). Build context excludes Git, virtualenvs, caches,
+tests, scripts, and common secret files; only requirements and application code
+are copied. Never store secrets in application source. Initial build needs access
+to Docker Hub and PyPI; dependencies use compatible ranges, not a reproducible lock.
+
+| Compose service / ID | Role | Internal listen / advertised address |
+| --- | --- | --- |
+| `main-server` | server | `0.0.0.0:8000` / `main-server:8000` |
+| `producer1`, `producer2` | producer | `0.0.0.0:8000` / respective DNS name, port 8000 |
+| `worker1`, `worker2` | worker | `0.0.0.0:8000` / respective DNS name, port 8000 |
+| `watchdog` | watchdog | `0.0.0.0:8000` / `watchdog:8000` |
+
+Communication is HTTP over Docker DNS on the named bridge `sentinel-network`;
+`MAIN_SERVER_URL=http://main-server:8000` and `MAIN_SERVER_ID=main-server` everywhere.
+This is an isolated application network, not an authentication or egress security
+boundary. Only central and watchdog publish ports, bound to host loopback at
+`127.0.0.1:8000` and `127.0.0.1:8005`. Producers/workers are reachable inside the
+network only. No Docker socket, volumes, or restart policies are configured.
+The local instructions below deliberately retain `server-1`, `producer-1`, etc.;
+Compose uses `main-server`, `producer1`, etc. Do not mix these identities.
+
+Central and watchdog have stdlib `/health` healthchecks (2s HTTP timeout, 3s
+process timeout, 5s intervals, 5s startup grace, five retries). Their healthchecks
+measure their own APIs, not fleet readiness. All other services wait for central
+health at initial startup; the watchdog uses the HTTP strategy. `depends_on` is
+startup ordering only: application registration retries and 404 re-registration
+still provide recovery after later central outages. `--wait` alone does not prove
+all registrations or monitoring cycles completed; run the smoke check too.
+
+The read-only stdlib smoke script queries both health endpoints, requires exactly
+four registered IDs with producer/worker roles, and five healthy, discoverable,
+checked watchdog observations including central. It retries startup for 60 seconds
+by default, bounds HTTP waits, and exits nonzero with the last error on failure.
+It neither launches processes nor controls Docker, so it stays outside the image.
+Optional `--server-url`, `--watchdog-url`, and `--timeout` customize its targets.
+To verify heartbeats, read `/services` twice at least five seconds apart and confirm
+`last_seen` advances for all four IDs (registry status itself is not live health).
+
+### Container failure and recovery exercise
+
+Start with a passing smoke check. Run each step separately, allowing subsequent
+monitoring cycles (normally 5–15 seconds; requests are sequential and timeout-bound).
+Use repeated bounded curl requests rather than assuming an immediate transition:
+
+```bash
+docker compose stop --timeout 10 worker1
+curl --fail --max-time 3 http://127.0.0.1:8005/status/worker1
+docker compose start worker1
+python3 tests/smoke_deployment.py --timeout 60
+docker compose stop --timeout 10 main-server
+curl --fail --max-time 3 http://127.0.0.1:8005/health
+curl --fail --max-time 3 http://127.0.0.1:8005/status
+docker compose start main-server
+python3 tests/smoke_deployment.py --timeout 60
+docker compose logs --tail 100 watchdog main-server worker1
+```
+
+While worker1 is stopped, its watchdog status becomes `unhealthy`; the other four
+observations stay healthy. Starting it with the same ID restores health without
+restarting the watchdog. While central is stopped, the watchdog API stays reachable,
+`main-server` becomes unhealthy, and all five known observations remain. Discovery
+flags become false, but the four live producer/worker HTTP checks remain healthy.
+The normal smoke is intentionally expected to fail during outages. After central
+starts, its empty in-memory registry is repopulated automatically: producer/worker
+heartbeats receive 404 and trigger re-registration. Discovery and all five healthy
+statuses recover. Expected connection/discovery failures are logged during outages.
+
+Python is PID 1 and receives Docker's SIGTERM directly. Existing lifespan teardown
+cancels/awaits background tasks and closes HTTP clients; Compose allows ten seconds
+before forced termination. Inspect logs for application shutdown completion. No
+restart policy heals a stopped container: `start` is an explicit operator action.
+Registry and cached watchdog state are not persisted; restarting the watchdog
+during a central outage loses previously discovered targets until discovery returns.
+
+Cleanup only the stack you started (do not stop unrelated projects):
+
+```bash
+docker compose down --timeout 10
+# Optional: remove the shared local image after cleanup.
+docker image rm sentinel:phase4
+```
 
 ## Six separate processes
 
@@ -61,7 +168,8 @@ is validated before uvicorn starts.
 | --- | --- | --- |
 | `SERVICE_ID` | `<role>-1` | Nonblank stable identity |
 | `SERVICE_ROLE` | Entrypoint role | Must match entrypoint |
-| `SERVICE_HOST` | `127.0.0.1` | Bind and registration hostname/IP, not URL |
+| `SERVICE_HOST` | `127.0.0.1` | Listen hostname/IP, not URL |
+| `SERVICE_ADVERTISE_HOST` | `SERVICE_HOST` | Optional peer-reachable hostname/IP used by registration and `get_info()` |
 | `SERVICE_PORT` | server 8000, producer 8001, worker 8002, watchdog 8005 | Integer 1–65535 |
 | `WATCHDOG_HOST` / `WATCHDOG_PORT` | `127.0.0.1` / `8005` | Watchdog defaults; explicit `SERVICE_HOST` / `SERVICE_PORT` take precedence |
 | `MAIN_SERVER_URL` | `http://127.0.0.1:8000` | Valid HTTP(S) central address |
@@ -75,8 +183,11 @@ is validated before uvicorn starts.
 
 All timing values must be finite positive numbers (booleans invalid in the Python
 constructor). Legacy unprefixed role/host/port variables are ignored. Binding to
-`0.0.0.0` is possible but is not a useful remote advertised address; this phase
-has no separate advertised-host setting.
+`0.0.0.0` listens on all interfaces; set `SERVICE_ADVERTISE_HOST` to a peer-reachable
+DNS hostname/IP instead. The optional Python `advertise_host` field is appended to
+preserve all prior positional arguments; `advertised_host` resolves its fallback.
+Empty, non-string, whitespace-containing, URL/path/query/fragment/userinfo values
+are rejected before startup, using the same address rules as the bind host.
 
 ## APIs and verification
 
@@ -164,6 +275,6 @@ records never automatically expire or disappear; the watchdog reports observatio
 without mutating central registry status. Checks are sequential: large fleets can
 make cycles slow, and interval is added after each cycle. HTTP timeouts bound
 network operations, not a strict whole-cycle deadline. No authentication, TLS
-configuration, events, analysis, persistence, automatic restarts, Docker, or later
+configuration, events, analysis, persistence, automatic restarts, or later
 features are implemented. This is a development system, not suitable for exposure
 to untrusted networks. Registration addresses are trusted configuration.
