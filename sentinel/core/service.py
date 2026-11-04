@@ -47,7 +47,7 @@ class BaseService(ABC):
             service_id=self.service_id,
             role=self.role,
             status=self.status,
-            host=self.config.host,
+            host=self.config.advertised_host,
             port=self.config.port,
         )
 
@@ -93,7 +93,7 @@ class BaseService(ABC):
         registered = False
         registration = Registration(
             service_id=self.service_id, role=self.role,
-            host=self.config.host, port=self.config.port,
+            host=self.config.advertised_host, port=self.config.port,
         )
         while True:
             try:

@@ -24,6 +24,11 @@ class ServiceConfig:
     health_check_timeout: float = 2.0
     heartbeat_timeout: float = 15.0
     health_check_strategy: str = "http"
+    advertise_host: str | None = None
+
+    @property
+    def advertised_host(self) -> str:
+        return self.host if self.advertise_host is None else self.advertise_host
 
     @classmethod
     def from_env(
@@ -60,6 +65,7 @@ class ServiceConfig:
             float(env.get("HEALTH_CHECK_TIMEOUT", "2")),
             float(env.get("HEARTBEAT_TIMEOUT", "15")),
             env.get("HEALTH_CHECK_STRATEGY", "http"),
+            env.get("SERVICE_ADVERTISE_HOST"),
         )
 
     def __post_init__(self) -> None:
@@ -71,12 +77,17 @@ class ServiceConfig:
             raise ValueError("role must be a ServiceRole")
         if type(self.port) is not int or not 1 <= self.port <= 65535:
             raise ValueError("port must be an integer between 1 and 65535")
-        if any(char.isspace() for char in self.host) or any(
-            char in self.host for char in "/?#@"
-        ) or "://" in self.host:
-            raise ValueError(
-                "host must be a hostname or IP address, not a URL",
-            )
+        for name in ("host", "advertise_host"):
+            value = getattr(self, name)
+            if name == "advertise_host" and value is None:
+                continue
+            if (not isinstance(value, str) or not value.strip()
+                    or any(char.isspace() for char in value)
+                    or any(char in value for char in "/?#@")
+                    or "://" in value):
+                raise ValueError(
+                    f"{name} must be a hostname or IP address, not a URL",
+                )
         for name in (
             "heartbeat_interval", "http_timeout", "monitor_interval",
             "health_check_timeout", "heartbeat_timeout",
