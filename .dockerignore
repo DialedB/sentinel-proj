@@ -1,0 +1,17 @@
+.git
+.venv
+venv
+**/__pycache__
+**/*.py[cod]
+.pytest_cache
+.coverage
+htmlcov
+.DS_Store
+.env
+.env.*
+**/*.pem
+**/*.key
+secrets
+secrets/**
+tests
+scripts

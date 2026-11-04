@@ -1,0 +1,110 @@
+x-environment: &environment
+  SERVICE_HOST: 0.0.0.0
+  SERVICE_PORT: "8000"
+  MAIN_SERVER_URL: http://main-server:8000
+  MAIN_SERVER_ID: main-server
+  HEARTBEAT_INTERVAL: "5"
+  HTTP_TIMEOUT: "2"
+
+x-service: &service
+  image: sentinel:phase4
+  build: .
+  networks:
+    - sentinel-network
+  stop_grace_period: 10s
+
+x-healthcheck: &healthcheck
+  test:
+    - CMD
+    - python
+    - -c
+    - "import json, urllib.request; r = urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2); assert json.load(r)['status'] == 'healthy'"
+  interval: 5s
+  timeout: 3s
+  start_period: 5s
+  retries: 5
+
+services:
+  main-server:
+    <<: *service
+    command: [python, -m, sentinel.server.main]
+    environment:
+      <<: *environment
+      SERVICE_ID: main-server
+      SERVICE_ROLE: server
+      SERVICE_ADVERTISE_HOST: main-server
+    ports:
+      - "127.0.0.1:8000:8000"
+    healthcheck: *healthcheck
+
+  producer1:
+    <<: *service
+    command: [python, -m, sentinel.producer.main]
+    environment:
+      <<: *environment
+      SERVICE_ID: producer1
+      SERVICE_ROLE: producer
+      SERVICE_ADVERTISE_HOST: producer1
+    depends_on:
+      main-server:
+        condition: service_healthy
+
+  producer2:
+    <<: *service
+    command: [python, -m, sentinel.producer.main]
+    environment:
+      <<: *environment
+      SERVICE_ID: producer2
+      SERVICE_ROLE: producer
+      SERVICE_ADVERTISE_HOST: producer2
+    depends_on:
+      main-server:
+        condition: service_healthy
+
+  worker1:
+    <<: *service
+    command: [python, -m, sentinel.worker.main]
+    environment:
+      <<: *environment
+      SERVICE_ID: worker1
+      SERVICE_ROLE: worker
+      SERVICE_ADVERTISE_HOST: worker1
+    depends_on:
+      main-server:
+        condition: service_healthy
+
+  worker2:
+    <<: *service
+    command: [python, -m, sentinel.worker.main]
+    environment:
+      <<: *environment
+      SERVICE_ID: worker2
+      SERVICE_ROLE: worker
+      SERVICE_ADVERTISE_HOST: worker2
+    depends_on:
+      main-server:
+        condition: service_healthy
+
+  watchdog:
+    <<: *service
+    command: [python, -m, sentinel.watchdog.main]
+    environment:
+      <<: *environment
+      SERVICE_ID: watchdog
+      SERVICE_ROLE: watchdog
+      SERVICE_ADVERTISE_HOST: watchdog
+      MONITOR_INTERVAL: "5"
+      HEALTH_CHECK_TIMEOUT: "2"
+      HEARTBEAT_TIMEOUT: "15"
+      HEALTH_CHECK_STRATEGY: http
+    ports:
+      - "127.0.0.1:8005:8000"
+    healthcheck: *healthcheck
+    depends_on:
+      main-server:
+        condition: service_healthy
+
+networks:
+  sentinel-network:
+    name: sentinel-network
+    driver: bridge
