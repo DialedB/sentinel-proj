@@ -1,8 +1,10 @@
 # Sentinel
 
-Sentinel targets Python 3.12. Phase 4 adds a six-container Docker Compose deployment
-to Phase 3 strategy-based monitoring and Phase 2 registration/heartbeats, preserving
-the Phase 1 Factory Method API. The local-process workflow remains supported.
+Sentinel targets Python 3.12. Phase 5 adds synthetic security events, an in-memory
+FIFO task queue, and worker-local command execution to the six-service deployment.
+Phases 1–4 factories, `run()` placeholders, registration, heartbeats, watchdog
+strategies, and local-process workflow remain supported. Actual execution uses
+`create_app()` lifespans and the existing module entrypoints.
 
 ## Setup and tests
 
@@ -21,6 +23,120 @@ require permission to listen on localhost and free ports 8000–8002 and (for th
 watchdog smoke) 8005. Allow TCP TIME_WAIT to expire before running the unchanged
 Phase 2 smoke immediately after another smoke using the same ports. Every child
 is stopped and awaited in `finally`, with bounded waits and a kill fallback.
+
+## Phase 5: security-event pipeline
+
+```mermaid
+flowchart TD
+    P[Two synthetic producers] -->|POST /events, stable event UUID| S[Central server: dedup and FIFO queue]
+    S -->|GET /tasks/next?worker_id=worker-1| W[Two registered workers]
+    W --> C[WorkerExecutor command registry]
+    C --> A[AnalyzeSecurityEventCommand]
+    A --> E[Independent SecurityEvaluator]
+    E -->|POST task result with worker_id| S
+    D[Watchdog strategies] -->|Health and heartbeat observations| S
+```
+
+The server **never executes commands**. Factory Method creates services; Command
+encapsulates worker analysis; the existing Strategy pattern selects watchdog
+health policy. Synchronous command execution uses `asyncio.to_thread`, so worker
+health and heartbeats remain responsive. Each producer/worker lifespan shares one
+async HTTP client between independent heartbeat and pipeline tasks; teardown cancels
+and awaits both tasks before closing that client. Cancelling a thread await cannot
+kill a synchronous command already running; current evaluation is short and bounded.
+
+Synthetic events contain a UUID `event_id`, `producer_id`, one of `benign`,
+`suspicious`, `high_risk`, an aware timestamp normalized to UTC, and a dictionary
+`payload`. The generator cycles all three types, using fictional user
+`fictional-alex` and documentation-only IP `192.0.2.10` (RFC 5737), not real user data.
+The evaluator has no HTTP dependencies; it returns `event_id`, `score` (0/40/80),
+`rule` (the event type), and an aware UTC evaluation `timestamp`.
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `EVENT_GENERATION_INTERVAL` | `2` | Seconds between submissions/retries; positive finite |
+| `WORKER_POLL_INTERVAL` | `1` | Seconds between worker iterations/retries; positive finite |
+| `PROCESSING_DELAY` | `0` | Optional nonnegative async demonstration delay before execution |
+
+The first pipeline iteration waits one configured interval after registration.
+Heartbeats keep running independently. Producers retain the exact pending event,
+including ID and timestamp, until acknowledgement; an ambiguous HTTP timeout does
+not create another event. Identical event resubmission returns the original task
+in its current state; the same event UUID with different content returns **409**.
+Each worker retains its computed success/failure result across transient HTTP
+failures, without re-executing or claiming another task. Result 404/409 is logged
+and released locally (e.g. server restart or lost terminal acknowledgement).
+Unknown commands produce a failure result, not execution retries.
+
+### Task API
+
+Existing `/health`, `/register`, `/heartbeat`, `/services`, and watchdog `/status`
+APIs are unchanged. New central endpoints:
+
+| Method/path | Response |
+| --- | --- |
+| `POST /events` | Validated event → deduplicated READY task (200) |
+| `GET /tasks` | Copied task snapshots, in insertion order |
+| `GET /tasks/next?worker_id=worker-1` | Atomically claim oldest READY task; 204 with no body if empty |
+| `GET /tasks/{task_id}` | One task, or 404 |
+| `POST /tasks/{task_id}/result` | Assigned worker's success/failure → terminal task |
+| `GET /stats` | `total`, `pending`, `ready`, `running`, `completed`, `failed`, `queue_depth` |
+
+Claims and results require an existing registry identity with role WORKER.
+Unknown identity/task returns 404; non-worker identity, wrong owner, invalid state,
+conflicting duplicate event, or mismatched result event ID returns 409. Invalid
+request schemas return 422. An analysis success must include the task's event ID.
+Results use a discriminated `outcome`: either `status=success` with a result dict,
+or `status=failure` with a nonblank error, never both.
+
+Example (stop automatic workers if you want to claim this task manually):
+
+```bash
+curl --fail --max-time 3 http://127.0.0.1:8000/register \
+  -H 'Content-Type: application/json' \
+  -d '{"service_id":"manual-worker","role":"worker","host":"127.0.0.1","port":9000}'
+curl --fail --max-time 3 http://127.0.0.1:8000/events \
+  -H 'Content-Type: application/json' \
+  -d '{"event_id":"a0000000-0000-4000-8000-000000000001","producer_id":"manual-producer","event_type":"suspicious","timestamp":"2026-11-05T12:00:00Z","payload":{"user":"fictional-alex","source_ip":"192.0.2.10"}}'
+curl --fail --max-time 3 'http://127.0.0.1:8000/tasks/next?worker_id=manual-worker'
+# Replace TASK_UUID with the returned task_id. Use the claimed event's event_id.
+curl --fail --max-time 3 http://127.0.0.1:8000/tasks/TASK_UUID/result \
+  -H 'Content-Type: application/json' \
+  -d '{"worker_id":"manual-worker","outcome":{"status":"success","result":{"event_id":"a0000000-0000-4000-8000-000000000001","score":40,"rule":"suspicious","timestamp":"2026-11-05T12:00:01Z"}}}'
+# Alternative failure body:
+# {"worker_id":"manual-worker","outcome":{"status":"failure","error":"analysis failed"}}
+curl --fail --max-time 3 http://127.0.0.1:8000/stats
+```
+
+Lifecycle is `PENDING → READY → RUNNING → COMPLETED | FAILED`. Ingestion creates
+READY immediately; PENDING is a domain construction state. Explicit transition
+methods reject skipped/repeated/terminal transitions. A process-local lock protects
+deduplication, queue operations, claims, results, and stats. Returned nested models
+are deep copies, and transition methods return new tasks without mutating originals.
+
+### Verification and intentional limits
+
+```bash
+.venv/bin/python -m unittest discover -s tests -v
+.venv/bin/python tests/smoke_pipeline.py --timeout 35
+# Optional independent port range:
+.venv/bin/python tests/smoke_pipeline.py --base-port 18860 --timeout 35
+```
+
+The bounded stdlib smoke launches six independent processes, checks all six health
+APIs, completed events from **both producers**, assignment/results from **both
+workers**, advancing completions and four heartbeats, plus five healthy discovered
+watchdog observations. It always terminates and awaits its children, with a kill
+fallback. Default ports are 18760–18765. The existing Phase 2/3/4 smokes remain valid.
+
+This is a single-server, single-uvicorn-process educational design. There is **no
+persistence, queue bound/retention policy, worker authentication, lease, timeout
+reclaim, reassignment, or execution retry**. Server restart loses all tasks and
+deduplication history. Worker death can leave RUNNING tasks forever; graceful
+shutdown can discard a local pending event/result. Registry identities and submitted
+results are simplistically trusted, not proof of execution or authorization. Do not
+expose these APIs to untrusted clients. Multiple server processes would have separate
+queues and registries; do not add uvicorn workers. No Phase 6 infrastructure is added.
 
 ## Phase 4: Docker Compose
 
