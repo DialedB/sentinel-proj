@@ -73,6 +73,12 @@ class BaseService(ABC):
                 async with ServiceHTTPClient(
                     self.config.server_url, self.config.http_timeout,
                 ) as client:
+                    self._registered = asyncio.Event()
+                    from sentinel.core.pipeline import run_pipeline
+                    pipeline = asyncio.create_task(
+                        run_pipeline(self.config, client, self._registered),
+                        name=f"pipeline-{self.service_id}",
+                    )
                     task = asyncio.create_task(
                         self._communicate(client),
                         name=f"heartbeat-{self.service_id}",
@@ -81,8 +87,8 @@ class BaseService(ABC):
                         yield
                     finally:
                         task.cancel()
-                        with suppress(asyncio.CancelledError):
-                            await task
+                        pipeline.cancel()
+                        await asyncio.gather(task, pipeline, return_exceptions=True)
             else:
                 yield
         finally:
@@ -100,6 +106,8 @@ class BaseService(ABC):
                 if not registered:
                     await client.register(registration)
                     registered = True
+                    if hasattr(self, '_registered'):
+                        self._registered.set()
                     logger.info("Registered service_id=%s", self.service_id)
                 else:
                     await client.heartbeat(self.service_id)

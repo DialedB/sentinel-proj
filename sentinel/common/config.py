@@ -25,6 +25,9 @@ class ServiceConfig:
     heartbeat_timeout: float = 15.0
     health_check_strategy: str = "http"
     advertise_host: str | None = None
+    event_generation_interval: float = 2.0
+    worker_poll_interval: float = 1.0
+    processing_delay: float = 0.0
 
     @property
     def advertised_host(self) -> str:
@@ -66,6 +69,9 @@ class ServiceConfig:
             float(env.get("HEARTBEAT_TIMEOUT", "15")),
             env.get("HEALTH_CHECK_STRATEGY", "http"),
             env.get("SERVICE_ADVERTISE_HOST"),
+            float(env.get("EVENT_GENERATION_INTERVAL", "2")),
+            float(env.get("WORKER_POLL_INTERVAL", "1")),
+            float(env.get("PROCESSING_DELAY", "0")),
         )
 
     def __post_init__(self) -> None:
@@ -91,11 +97,16 @@ class ServiceConfig:
         for name in (
             "heartbeat_interval", "http_timeout", "monitor_interval",
             "health_check_timeout", "heartbeat_timeout",
+            "event_generation_interval", "worker_poll_interval",
         ):
             value = getattr(self, name)
             if (isinstance(value, bool) or not isinstance(value, (int, float))
                     or not math.isfinite(value) or value <= 0):
                 raise ValueError(f"{name} must be a finite positive number")
+        if (isinstance(self.processing_delay, bool)
+                or not isinstance(self.processing_delay, (int, float))
+                or not math.isfinite(self.processing_delay) or self.processing_delay < 0):
+            raise ValueError("processing_delay must be a finite nonnegative number")
         if self.health_check_strategy not in ("http", "heartbeat"):
             raise ValueError("health_check_strategy must be http or heartbeat")
         try:

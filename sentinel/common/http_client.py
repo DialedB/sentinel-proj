@@ -5,6 +5,7 @@ from types import TracebackType
 import httpx
 
 from sentinel.common.transport import Registration
+from sentinel.common.tasks import SecurityEvent, Task, TaskResult
 
 
 class ServiceHTTPClient:
@@ -22,6 +23,22 @@ class ServiceHTTPClient:
         exc_value: BaseException | None, traceback: TracebackType | None,
     ) -> None:
         await self._client.__aexit__(exc_type, exc_value, traceback)
+
+    async def submit_event(self, event: SecurityEvent) -> Task:
+        response = await self._client.post('events', json=event.model_dump(mode='json'))
+        response.raise_for_status()
+        return Task.model_validate(response.json())
+
+    async def claim_task(self, worker_id: str) -> Task | None:
+        response = await self._client.get('tasks/next', params={'worker_id': worker_id})
+        response.raise_for_status()
+        return None if response.status_code == 204 else Task.model_validate(response.json())
+
+    async def submit_result(self, task_id, result: TaskResult) -> Task:
+        response = await self._client.post(
+            f'tasks/{task_id}/result', json=result.model_dump(mode='json'))
+        response.raise_for_status()
+        return Task.model_validate(response.json())
 
     async def register(self, registration: Registration) -> None:
         response = await self._client.post(

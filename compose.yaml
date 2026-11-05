@@ -5,6 +5,9 @@ x-environment: &environment
   MAIN_SERVER_ID: main-server
   HEARTBEAT_INTERVAL: "5"
   HTTP_TIMEOUT: "2"
+  EVENT_GENERATION_INTERVAL: "2"
+  WORKER_POLL_INTERVAL: "1"
+  PROCESSING_DELAY: "0"
 
 x-service: &service
   image: sentinel:phase4
