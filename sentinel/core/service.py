@@ -2,7 +2,6 @@
 
 import asyncio
 import logging
-from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 
@@ -29,7 +28,7 @@ from sentinel.watchdog.strategies import (
 logger = logging.getLogger(__name__)
 
 
-class BaseService(ABC):
+class BaseService:
     def __init__(self, config: ServiceConfig) -> None:
         self.config = config
         self.status = ServiceStatus.STARTING
@@ -125,11 +124,6 @@ class BaseService(ABC):
                                    self.service_id, error)
             await asyncio.sleep(self.config.heartbeat_interval)
 
-    @abstractmethod
-    def run(self) -> None:
-        """Run the service; execution is outside Phase 1's scope."""
-        raise NotImplementedError
-
 
 class ServerService(BaseService):
     def __init__(self, config: ServiceConfig) -> None:
@@ -169,18 +163,13 @@ class ServerService(BaseService):
 
         return app
 
-    def run(self) -> None:
-        raise NotImplementedError("Server execution is not implemented yet")
-
 
 class ProducerService(BaseService):
-    def run(self) -> None:
-        raise NotImplementedError("Producer execution is not implemented yet")
+    """Producer role using the shared application and lifespan."""
 
 
 class WorkerService(BaseService):
-    def run(self) -> None:
-        raise NotImplementedError("Worker execution is not implemented yet")
+    """Worker role using the shared application and lifespan."""
 
 
 class WatchdogService(BaseService):
@@ -232,6 +221,3 @@ class WatchdogService(BaseService):
         finally:
             self.status = ServiceStatus.STOPPED
             logger.info("Shutdown complete service_id=%s", self.service_id)
-
-    def run(self) -> None:
-        raise NotImplementedError("Watchdog execution is not implemented yet")

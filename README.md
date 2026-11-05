@@ -376,7 +376,7 @@ restart, producers/workers re-register and monitoring recovers automatically.
 - `server/registry.py`: lock-protected in-memory registry.
 - `core/factory.py`: existing Factory Method creators; construction has no I/O.
 - `core/service.py`: `create_app()`, APIs and lifespan ownership. WatchdogService
-  composes a `ServiceMonitor` rather than replacing the factory or Phase 1 class.
+  composes a `ServiceMonitor` while retaining the factory-created role classes.
 - `core/entrypoint.py` and role `main.py`: factory-driven uvicorn entrypoints.
 - `watchdog/strategies.py`: async Strategy ABC and HTTP/heartbeat policies.
 - `watchdog/monitor.py`: `ServiceMonitor` with constructor-injected strategy,
@@ -388,8 +388,8 @@ by status API handlers. Each service exception is logged and checking continues;
 outer loop failures are logged and retried. INFO transition logs are emitted only
 when status changes, including initial checks (`UNCHECKED`) and recovery, e.g.
 `[WATCHDOG] worker-1 HEALTHY -> UNHEALTHY`. Cancellation propagates. Shutdown
-cancels and awaits the task **before** closing its client. All original `run()`
-methods deliberately still raise `NotImplementedError` for Phase 1 compatibility.
+cancels and awaits the task **before** closing its client. Services execute through
+`serve()` and `create_app()` with ASGI lifespans, not a separate `run()` method.
 
 Tests cover HTTP failures/identity/timeouts, heartbeat timestamp validation,
 monitor transitions, missing discovery, outages and recovery, snapshot isolation,

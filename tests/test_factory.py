@@ -1,4 +1,4 @@
-"""Tests for Phase 1 construction contracts; no services are started."""
+"""Tests for factory construction contracts; no services are started."""
 
 import unittest
 from dataclasses import FrozenInstanceError, replace
@@ -71,14 +71,14 @@ class FactoryTests(unittest.TestCase):
         self.assertIs(service.get_info().status, ServiceStatus.HEALTHY)
         self.assertIs(original.status, ServiceStatus.STARTING)
 
-    def test_run_is_explicitly_unimplemented(self) -> None:
-        for factory, _, role in self.cases:
-            with self.subTest(role=role), self.assertRaises(NotImplementedError):
-                factory().create_service(replace(self.config, role=role)).run()
+    def test_base_service_provides_shared_application(self) -> None:
+        service = BaseService(self.config)
+        app = service.create_app()
+        self.assertIs(app.state.service, service)
+        self.assertIn("/health", {route.path for route in app.routes})
+        self.assertIs(service.status, ServiceStatus.STARTING)
 
-    def test_base_contracts_are_abstract(self) -> None:
-        with self.assertRaises(TypeError):
-            BaseService(self.config)
+    def test_factory_contract_is_abstract(self) -> None:
         with self.assertRaises(TypeError):
             ServiceFactory()
 

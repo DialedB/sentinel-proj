@@ -1,4 +1,4 @@
-"""Validated HTTP payloads, separate from the Phase 1 domain snapshots."""
+"""Validated HTTP payloads, separate from the domain snapshots."""
 
 from datetime import datetime
 
