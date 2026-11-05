@@ -127,10 +127,15 @@ class ServerService(BaseService):
     def __init__(self, config: ServiceConfig) -> None:
         super().__init__(config)
         self.registry = ServiceRegistry()
+        from sentinel.server.tasks import TaskQueue
+        self.tasks = TaskQueue()
 
     def create_app(self) -> FastAPI:
         app = super().create_app()
         app.state.registry = self.registry
+        app.state.tasks = self.tasks
+        from sentinel.server.task_routes import install_task_routes
+        install_task_routes(app, self.tasks, self.registry)
 
         @app.post("/register", response_model=RegisteredService)
         async def register(payload: Registration) -> RegisteredService:
