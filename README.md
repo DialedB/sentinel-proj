@@ -45,12 +45,26 @@ async HTTP client between independent heartbeat and pipeline tasks; teardown can
 and awaits both tasks before closing that client. Cancelling a thread await cannot
 kill a synchronous command already running; current evaluation is short and bounded.
 
-Synthetic events contain a UUID `event_id`, `producer_id`, one of `benign`,
-`suspicious`, `high_risk`, an aware timestamp normalized to UTC, and a dictionary
-`payload`. The generator cycles all three types, using fictional user
-`fictional-alex` and documentation-only IP `192.0.2.10` (RFC 5737), not real user data.
-The evaluator has no HTTP dependencies; it returns `event_id`, `score` (0/40/80),
-`rule` (the event type), and an aware UTC evaluation `timestamp`.
+Synthetic events contain exactly `event_id` (UUID), `source` (the producer's
+service ID), `event_type`, `timestamp` (aware and normalized to UTC), and a dictionary
+`payload`. Event types describe activity, not classifications:
+
+| Event type | Classification | Risk score | Triggered rule |
+| --- | --- | --- | --- |
+| `login_success` | `BENIGN` | 0 | `login_success` |
+| `login_failed` | `SUSPICIOUS` | 40 | `login_failed` |
+| `access_denied` | `HIGH_RISK` | 80 | `access_denied` |
+
+`SecurityEventGenerator` in `sentinel/producer/generator.py` cycles all three types,
+using fictional user `fictional-alex` and documentation-only IP `192.0.2.10`
+(RFC 5737), not real user data. `SecurityEvaluator` lives independently in
+`sentinel/security/evaluator.py`, with no HTTP dependencies. It returns exactly
+`event_id`, `classification`, `risk_score`, `triggered_rule` (the matched event
+type), and `processing_timestamp` (an ISO-formatted aware UTC evaluation time).
+`TaskCommand` and `AnalyzeSecurityEventCommand` live in `sentinel/core/commands.py`;
+the analysis command delegates to the evaluator. `WorkerExecutor` in
+`sentinel/worker/executor.py` owns the small command registry. The server only
+queues events and stores results; it does not classify events.
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
@@ -97,12 +111,12 @@ curl --fail --max-time 3 http://127.0.0.1:8000/register \
   -d '{"service_id":"manual-worker","role":"worker","host":"127.0.0.1","port":9000}'
 curl --fail --max-time 3 http://127.0.0.1:8000/events \
   -H 'Content-Type: application/json' \
-  -d '{"event_id":"a0000000-0000-4000-8000-000000000001","producer_id":"manual-producer","event_type":"suspicious","timestamp":"2026-11-05T12:00:00Z","payload":{"user":"fictional-alex","source_ip":"192.0.2.10"}}'
+  -d '{"event_id":"a0000000-0000-4000-8000-000000000001","source":"manual-producer","event_type":"login_failed","timestamp":"2026-11-05T12:00:00Z","payload":{"user":"fictional-alex","source_ip":"192.0.2.10"}}'
 curl --fail --max-time 3 'http://127.0.0.1:8000/tasks/next?worker_id=manual-worker'
 # Replace TASK_UUID with the returned task_id. Use the claimed event's event_id.
 curl --fail --max-time 3 http://127.0.0.1:8000/tasks/TASK_UUID/result \
   -H 'Content-Type: application/json' \
-  -d '{"worker_id":"manual-worker","outcome":{"status":"success","result":{"event_id":"a0000000-0000-4000-8000-000000000001","score":40,"rule":"suspicious","timestamp":"2026-11-05T12:00:01Z"}}}'
+  -d '{"worker_id":"manual-worker","outcome":{"status":"success","result":{"event_id":"a0000000-0000-4000-8000-000000000001","classification":"SUSPICIOUS","risk_score":40,"triggered_rule":"login_failed","processing_timestamp":"2026-11-05T12:00:01Z"}}}'
 # Alternative failure body:
 # {"worker_id":"manual-worker","outcome":{"status":"failure","error":"analysis failed"}}
 curl --fail --max-time 3 http://127.0.0.1:8000/stats
@@ -126,8 +140,9 @@ are deep copies, and transition methods return new tasks without mutating origin
 The bounded stdlib smoke launches six independent processes, checks all six health
 APIs, completed events from **both producers**, assignment/results from **both
 workers**, advancing completions and four heartbeats, plus five healthy discovered
-watchdog observations. It always terminates and awaits its children, with a kill
-fallback. Default ports are 18760–18765. The existing Phase 2/3/4 smokes remain valid.
+watchdog observations. It verifies the exact event and result fields, all three
+classifications, risk scores, triggered rules, and aware UTC processing timestamps.
+It always terminates and awaits its children, with a kill fallback. Default ports are 18760–18765. The existing Phase 2/3/4 smokes remain valid.
 
 This is a single-server, single-uvicorn-process educational design. There is **no
 persistence, queue bound/retention policy, worker authentication, lease, timeout
