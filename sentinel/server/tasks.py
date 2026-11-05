@@ -1,5 +1,6 @@
 """Single-process lock-protected FIFO queue. No execution occurs here."""
 from collections import deque
+import json
 from threading import Lock
 from uuid import UUID
 from sentinel.common.tasks import SecurityEvent, Task, TaskResult, TaskState
@@ -16,7 +17,9 @@ class TaskQueue:
         with self._lock:
             if event.event_id in self._events:
                 task = self._tasks[self._events[event.event_id]]
-                if task.event != event:
+                # JSON comparison distinguishes booleans from numbers (True == 1 in Python).
+                if (json.dumps(task.event.model_dump(mode='json'), sort_keys=True)
+                        != json.dumps(event.model_dump(mode='json'), sort_keys=True)):
                     raise ValueError('Event ID already exists with different content')
             else:
                 task = Task(event=event.model_copy(deep=True)).ready()
