@@ -1,26 +1,29 @@
 """Single-process lock-protected FIFO queue. No execution occurs here."""
-from collections import deque
+
 import json
+from collections import deque
 from threading import Lock
 from uuid import UUID
+
 from sentinel.common.tasks import SecurityEvent, Task, TaskResult, TaskState
 
 
 class TaskQueue:
-    def __init__(self):
+    def __init__(self) -> None:
         self._lock = Lock()
-        self._tasks = {}
-        self._events = {}
-        self._ready = deque()
+        self._tasks: dict[UUID, Task] = {}
+        self._events: dict[UUID, UUID] = {}
+        self._ready: deque[UUID] = deque()
 
     def submit(self, event: SecurityEvent) -> Task:
         with self._lock:
             if event.event_id in self._events:
                 task = self._tasks[self._events[event.event_id]]
-                # JSON comparison distinguishes booleans from numbers (True == 1 in Python).
-                if (json.dumps(task.event.model_dump(mode='json'), sort_keys=True)
-                        != json.dumps(event.model_dump(mode='json'), sort_keys=True)):
-                    raise ValueError('Event ID already exists with different content')
+                # JSON distinguishes booleans from numbers (True == 1 in Python).
+                if json.dumps(
+                    task.event.model_dump(mode="json"), sort_keys=True
+                ) != json.dumps(event.model_dump(mode="json"), sort_keys=True):
+                    raise ValueError("Event ID already exists with different content")
             else:
                 task = Task(event=event.model_copy(deep=True)).ready()
                 self._tasks[task.task_id] = task
@@ -52,8 +55,15 @@ class TaskQueue:
         with self._lock:
             return [task.model_copy(deep=True) for task in self._tasks.values()]
 
-    def stats(self):
+    def stats(self) -> dict[str, int]:
         with self._lock:
-            return dict(total=len(self._tasks), queue_depth=len(self._ready), **{
-                state.value.lower(): sum(t.state == state for t in self._tasks.values())
-                for state in TaskState})
+            return dict(
+                total=len(self._tasks),
+                queue_depth=len(self._ready),
+                **{
+                    state.value.lower(): sum(
+                        t.state == state for t in self._tasks.values()
+                    )
+                    for state in TaskState
+                }
+            )
