@@ -34,6 +34,7 @@ services:
     environment:
       <<: *environment
       SERVICE_ID: main-server
+      WATCHDOG_URL: http://watchdog:8000
       SERVICE_ROLE: server
       SERVICE_ADVERTISE_HOST: main-server
     ports:

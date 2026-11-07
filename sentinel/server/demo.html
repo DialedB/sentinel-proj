@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sentinel · Read-only demo</title>
+  <style>
+    :root { font-family: system-ui, sans-serif; color: #172635; background: #f4f6f8; }
+    body { max-width: 1600px; margin: 2rem auto; padding: 0 1rem; }
+    h1, h2 { margin-bottom: .5rem; }
+    .cards { display: flex; flex-wrap: wrap; gap: .75rem; }
+    .card { background: white; border: 1px solid #c7d0d9; border-radius: .4rem; padding: 1rem; flex: 1 1 150px; overflow-wrap: anywhere; }
+    .card strong { display: block; margin-bottom: .4rem; }
+    .healthy { color: #146530; } .unhealthy, .error { color: #a12020; }
+    .scroll { overflow-x: auto; }
+    table { border-collapse: collapse; background: white; width: 100%; min-width: 1250px; font-size: .8rem; line-height: 1.4; }
+    caption { text-align: left; padding: .75rem 0; }
+    th, td { text-align: left; vertical-align: top; padding: .5rem .65rem; border-bottom: 1px solid #c7d0d9; }
+    th { white-space: nowrap; }
+    td:first-child { min-width: 15rem; }
+    td:nth-child(2) { min-width: 10rem; }
+    td:nth-child(3), td:nth-child(4), td:nth-child(5) { white-space: nowrap; }
+    td:last-child { min-width: 20rem; overflow-wrap: anywhere; }
+    .note, small { color: #425569; }
+    section { margin: 1.75rem 0; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Sentinel</h1>
+    <p>Read-only demo · automatically refreshes 3 seconds after each refresh finishes.</p>
+    <p class="note">Synthetic security events only. No controls here change service or task state.</p>
+  </header>
+  <main>
+    <section aria-labelledby="services-heading">
+      <h2 id="services-heading">Service health</h2>
+      <p class="note">Watchdog observations, not registration or heartbeat claims. Check times indicate observation age.</p>
+      <p id="services-message" role="status">Loading watchdog status…</p>
+      <div id="services" class="cards"></div>
+    </section>
+    <section aria-labelledby="stats-heading">
+      <h2 id="stats-heading">Tasks</h2>
+      <p id="stats-message" role="status">Loading counters…</p>
+      <div id="stats" class="cards"></div>
+    </section>
+    <section aria-labelledby="tasks-heading">
+      <h2 id="tasks-heading">Recent tasks and results</h2>
+      <p id="tasks-message" role="status">Loading tasks…</p>
+      <div class="scroll">
+        <table>
+          <caption>Latest 10 tasks by creation time; queued means READY in the task API.</caption>
+          <thead><tr><th scope="col">Task / created</th><th scope="col">Producer / event</th><th scope="col">Worker</th><th scope="col">State</th><th scope="col">Classification</th><th scope="col">Risk score</th><th scope="col">Result / error</th></tr></thead>
+          <tbody id="tasks"></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+  <noscript>This demo requires JavaScript to retrieve live data.</noscript>
+  <script>
+    'use strict';
+    const byId = id => document.getElementById(id);
+    function element(tag, text, className) {
+      const node = document.createElement(tag);
+      if (text !== undefined) node.textContent = String(text);
+      if (className) node.className = className;
+      return node;
+    }
+    function time(value) {
+      return value ? new Date(value).toLocaleString() : 'not yet checked';
+    }
+    async function getJSON(path) {
+      const response = await fetch(path, {signal: AbortSignal.timeout(8000), cache: 'no-store'});
+      if (!response.ok) throw new Error(`Request failed (HTTP ${response.status})`);
+      return response.json();
+    }
+    function services(data) {
+      const cards = data.map(service => {
+        const card = element('div', undefined, 'card');
+        const status = service.status ?? 'unchecked';
+        card.append(element('strong', `${service.service_id} · ${service.role}`));
+        card.append(element('p', status, ['healthy', 'unhealthy'].includes(status) ? status : ''));
+        card.append(element('small', `Last checked: ${time(service.last_checked)}`));
+        if (service.error) card.append(element('p', service.error));
+        return card;
+      });
+      byId('services').replaceChildren(...cards);
+      return data.length ? 'Watchdog observations retrieved.' : 'No watchdog observations yet; health is unknown.';
+    }
+    function stats(data) {
+      const cards = [['Queued', 'queue_depth'], ['Running', 'running'], ['Completed', 'completed'], ['Failed', 'failed']].map(([label, key]) => {
+        const card = element('div', undefined, 'card');
+        card.append(element('strong', label), element('span', data[key] ?? '—'));
+        return card;
+      });
+      byId('stats').replaceChildren(...cards);
+      return 'Counters retrieved.';
+    }
+    function tasks(data) {
+      const latest = [...data].sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at)).slice(0, 10);
+      const rows = latest.map(task => {
+        const outcome = task.outcome;
+        const result = outcome?.status === 'success' ? outcome.result : null;
+        const row = element('tr');
+        const values = [
+          `${task.task_id} / ${time(task.created_at)}`,
+          `${task.event.source} / ${task.event.event_type}`,
+          task.worker_id ?? '—', task.state,
+          result?.classification ?? '—', result?.risk_score ?? '—',
+          outcome?.status === 'failure' ? outcome.error : result ? JSON.stringify(result) : 'Awaiting result'
+        ];
+        values.forEach(value => row.append(element('td', value)));
+        return row;
+      });
+      byId('tasks').replaceChildren(...rows);
+      return latest.length ? 'Recent tasks retrieved.' : 'No tasks yet.';
+    }
+    async function update(id, path, render) {
+      const message = byId(`${id}-message`);
+      try {
+        const data = await getJSON(path);
+        message.textContent = `${render(data)} Updated ${new Date().toLocaleTimeString()}.`;
+        message.className = '';
+      } catch (error) {
+        byId(id).replaceChildren();
+        message.textContent = `${id === 'services' ? 'Watchdog status' : id === 'stats' ? 'Task counters' : 'Recent tasks'} unavailable. ${error.message}. Retrying automatically.`;
+        message.className = 'error';
+      }
+    }
+    async function refresh() {
+      await Promise.allSettled([
+        update('services', '/demo/status', services),
+        update('stats', '/stats', stats),
+        update('tasks', '/tasks', tasks)
+      ]);
+      setTimeout(refresh, 3000);
+    }
+    refresh();
+  </script>
+</body>
+</html>

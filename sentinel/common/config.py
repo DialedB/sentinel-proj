@@ -28,6 +28,7 @@ class ServiceConfig:
     event_generation_interval: float = 2.0
     worker_poll_interval: float = 1.0
     processing_delay: float = 0.0
+    watchdog_url: str = "http://127.0.0.1:8005"
 
     @property
     def advertised_host(self) -> str:
@@ -72,6 +73,7 @@ class ServiceConfig:
             float(env.get("EVENT_GENERATION_INTERVAL", "2")),
             float(env.get("WORKER_POLL_INTERVAL", "1")),
             float(env.get("PROCESSING_DELAY", "0")),
+            env.get("WATCHDOG_URL", "http://127.0.0.1:8005"),
         )
 
     def __post_init__(self) -> None:
@@ -109,17 +111,20 @@ class ServiceConfig:
             raise ValueError("processing_delay must be a finite nonnegative number")
         if self.health_check_strategy not in ("http", "heartbeat"):
             raise ValueError("health_check_strategy must be http or heartbeat")
-        try:
-            url = urlsplit(self.server_url)
-            valid = (
-                url.scheme in ("http", "https")
-                and bool(url.hostname)
-                and not any(char.isspace() for char in self.server_url)
-                and (url.port is None or 1 <= url.port <= 65535)
-            )
-        except ValueError as error:
-            raise ValueError(
-                "server_url must be a valid HTTP(S) URL",
-            ) from error
-        if not valid:
-            raise ValueError("server_url must be a valid HTTP(S) URL")
+        for name in ("server_url", "watchdog_url"):
+            value = getattr(self, name)
+            try:
+                url = urlsplit(value) if isinstance(value, str) else None
+                valid = (
+                    url is not None
+                    and url.scheme in ("http", "https")
+                    and bool(url.hostname)
+                    and not any(char.isspace() for char in value)
+                    and (url.port is None or 1 <= url.port <= 65535)
+                )
+            except ValueError as error:
+                raise ValueError(
+                    f"{name} must be a valid HTTP(S) URL",
+                ) from error
+            if not valid:
+                raise ValueError(f"{name} must be a valid HTTP(S) URL")

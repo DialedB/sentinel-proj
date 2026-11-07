@@ -138,6 +138,8 @@ class ServerService(BaseService):
         app.state.tasks = self.tasks
         from sentinel.server.task_routes import install_task_routes
         install_task_routes(app, self.tasks, self.registry)
+        from sentinel.server.demo import install_demo_routes
+        install_demo_routes(app, self.config)
 
         @app.post("/register", response_model=RegisteredService)
         async def register(payload: Registration) -> RegisteredService:
@@ -162,6 +164,17 @@ class ServerService(BaseService):
             return self.registry.snapshot()
 
         return app
+
+    @asynccontextmanager
+    async def _lifespan(self, app: FastAPI) -> AsyncIterator[None]:
+        async with httpx.AsyncClient(
+            timeout=self.config.http_timeout,
+            limits=httpx.Limits(max_connections=10, max_keepalive_connections=5),
+            follow_redirects=False,
+        ) as client:
+            app.state.demo_client = client
+            async with super()._lifespan(app):
+                yield
 
 
 class ProducerService(BaseService):

@@ -1,4 +1,4 @@
-"""Independent producer/worker loops sharing the heartbeat HTTP client."""
+"""Event submission and task processing loops."""
 
 import asyncio
 import logging
@@ -99,8 +99,7 @@ async def run_pipeline(
         else config.worker_poll_interval
     )
     await asyncio.sleep(interval)
-    await (
-        produce(config, client)
-        if config.role == ServiceRole.PRODUCER
-        else work(config, client)
-    )
+    if config.role == ServiceRole.PRODUCER:
+        await produce(config, client)
+    else:
+        await work(config, client)

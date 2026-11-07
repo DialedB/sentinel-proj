@@ -19,8 +19,8 @@ def install_task_routes(
     queue: TaskQueue,
     registry: ServiceRegistry,
 ) -> None:
-    def worker(worker_id: str) -> None:
-        records = {r.service_id: r for r in registry.snapshot()}
+    def require_worker(worker_id: str) -> None:
+        records = {record.service_id: record for record in registry.snapshot()}
         if worker_id not in records:
             raise HTTPException(404, "Unknown worker ID")
         if records[worker_id].role != ServiceRole.WORKER:
@@ -42,7 +42,7 @@ def install_task_routes(
     async def claim(
         worker_id: str = Query(min_length=1, pattern=r"\S"),
     ) -> Task | Response:
-        worker(worker_id)
+        require_worker(worker_id)
         task = operation(lambda: queue.claim(worker_id))
         return task if task is not None else Response(status_code=204)
 
@@ -60,5 +60,5 @@ def install_task_routes(
 
     @app.post("/tasks/{task_id}/result", response_model=Task)
     async def result(task_id: UUID, result: TaskResult) -> Task:
-        worker(result.worker_id)
+        require_worker(result.worker_id)
         return operation(lambda: queue.finish(task_id, result))

@@ -1,10 +1,9 @@
 # Sentinel
 
-Sentinel targets Python 3.12. Phase 5 adds synthetic security events, an in-memory
-FIFO task queue, and worker-local command execution to the six-service deployment.
-Phases 1–4 factories, `run()` placeholders, registration, heartbeats, watchdog
-strategies, and local-process workflow remain supported. Actual execution uses
-`create_app()` lifespans and the existing module entrypoints.
+Sentinel is a Python 3.12 university project for distributed security event
+processing. Producers generate synthetic events, the central server queues them,
+workers evaluate them, and an independent watchdog monitors service health.
+Services run as separate processes or Docker containers.
 
 ## Setup and tests
 
@@ -23,6 +22,25 @@ require permission to listen on localhost and free ports 8000–8002 and (for th
 watchdog smoke) 8005. Allow TCP TIME_WAIT to expire before running the unchanged
 Phase 2 smoke immediately after another smoke using the same ports. Every child
 is stopped and awaited in `finally`, with bounded waits and a kill fallback.
+
+## Read-only demo page
+
+With the services running, open **http://localhost:8000/**. The dependency-free
+page shows watchdog health observations, queued/running/completed/failed task
+counts, and the latest 10 tasks with producer, worker, classification, risk score,
+and result or failure details. Sections refresh independently, 3 seconds after
+all requests finish; unavailable data is explicitly labelled, not shown as healthy.
+The page makes only read-only requests and never claims tasks.
+
+The central server proxies watchdog status at `GET /demo/status`; no browser CORS
+configuration is needed. `WATCHDOG_URL` defaults to `http://127.0.0.1:8005` for local
+processes and is set to `http://watchdog:8000` for the main server in Compose.
+Set it to your external watchdog's HTTP(S) base URL when needed. The proxy uses a
+shared lifespan-owned client with an explicit `HTTP_TIMEOUT` request timeout and
+total deadline; redirects are not followed. The page displays watchdog observation
+times (not registration/heartbeat health claims), and shows unavailable if the
+watchdog cannot be reached. Like the existing APIs, this demo has no authentication;
+keep it on a trusted local network. The existing Dockerfile includes the HTML.
 
 ## Phase 5: security-event pipeline
 
@@ -306,8 +324,9 @@ is validated before uvicorn starts.
 | `WATCHDOG_HOST` / `WATCHDOG_PORT` | `127.0.0.1` / `8005` | Watchdog defaults; explicit `SERVICE_HOST` / `SERVICE_PORT` take precedence |
 | `MAIN_SERVER_URL` | `http://127.0.0.1:8000` | Valid HTTP(S) central address |
 | `MAIN_SERVER_ID` | `server-1` | Expected central identity, independent of registry |
+| `WATCHDOG_URL` | `http://127.0.0.1:8005` | HTTP(S) watchdog base URL for the central demo proxy; Compose uses `http://watchdog:8000` |
 | `HEARTBEAT_INTERVAL` | `5` | Heartbeat and registration retry seconds |
-| `HTTP_TIMEOUT` | `5` | Producer/worker HTTP timeout seconds |
+| `HTTP_TIMEOUT` | `5` | Producer/worker HTTP timeout and central demo proxy deadline seconds |
 | `MONITOR_INTERVAL` | `5` | Delay in seconds between completed monitoring cycles |
 | `HEALTH_CHECK_TIMEOUT` | `2` | Explicit watchdog HTTP request timeout seconds |
 | `HEARTBEAT_TIMEOUT` | `15` | Maximum heartbeat age seconds |
@@ -406,7 +425,7 @@ central process and one watchdog process, not multiple uvicorn workers. Registry
 records never automatically expire or disappear; the watchdog reports observations
 without mutating central registry status. Checks are sequential: large fleets can
 make cycles slow, and interval is added after each cycle. HTTP timeouts bound
-network operations, not a strict whole-cycle deadline. No authentication, TLS
-configuration, events, analysis, persistence, automatic restarts, or later
-features are implemented. This is a development system, not suitable for exposure
-to untrusted networks. Registration addresses are trusted configuration.
+network operations, not a strict whole-cycle deadline. There is no authentication,
+TLS configuration, persistence, or automatic restart support. This is a development
+system and should not be exposed to untrusted networks. Registration addresses
+are trusted configuration.

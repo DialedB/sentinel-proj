@@ -1,4 +1,4 @@
-"""Discovery and resilient sequential checks, independent of API requests."""
+"""Discover services and keep their latest health observations."""
 
 import asyncio
 import logging
@@ -59,8 +59,8 @@ class ServiceMonitor:
                 raise ValueError(
                     "Registry identity conflicts with configured central ID",
                 )
-        for key, result in self._results.items():
-            self._results[key] = replace(result, discoverable=False)
+        for service_id, result in self._results.items():
+            self._results[service_id] = replace(result, discoverable=False)
         self._results[self.config.main_server_id] = replace(
             self._results[self.config.main_server_id], discoverable=True,
         )
@@ -71,12 +71,12 @@ class ServiceMonitor:
                 record.service_id, record.role, address, record.last_seen,
             )
             self.services[service.service_id] = service
-            old = self._results.get(
+            previous_result = self._results.get(
                 service.service_id,
                 CheckResult(service.service_id, service.role),
             )
             self._results[service.service_id] = replace(
-                old, role=service.role, discoverable=True,
+                previous_result, role=service.role, discoverable=True,
             )
 
     async def check_once(self) -> None:
@@ -86,40 +86,43 @@ class ServiceMonitor:
         except Exception as error:
             logger.exception("Central discovery failed")
             discovery_error = f"Discovery failed: {error}"
-            for key, result in self._results.items():
-                self._results[key] = replace(result, discoverable=False)
-        for key, service in list(self.services.items()):
+            for service_id, result in self._results.items():
+                self._results[service_id] = replace(result, discoverable=False)
+        for service_id, service in list(self.services.items()):
             error_message = None
             try:
                 strategy = (
                     self.central_strategy
-                    if key == self.config.main_server_id else self.strategy
+                    if service_id == self.config.main_server_id else self.strategy
                 )
                 healthy = await strategy.check(service)
                 if not healthy:
                     error_message = "Health check failed"
             except Exception as error:
-                logger.exception("Health check failed service_id=%s", key)
+                logger.exception("Health check failed service_id=%s", service_id)
                 healthy = False
                 error_message = str(error) or type(error).__name__
-            if key == self.config.main_server_id and discovery_error:
+            if service_id == self.config.main_server_id and discovery_error:
                 healthy = False
                 error_message = discovery_error
             now = datetime.now(timezone.utc)
-            old = self._results[key]
+            previous_result = self._results[service_id]
             status = (
                 ServiceStatus.HEALTHY if healthy else ServiceStatus.UNHEALTHY
             )
-            self._results[key] = replace(
-                old, status=status, last_checked=now,
-                last_successful=now if healthy else old.last_successful,
+            self._results[service_id] = replace(
+                previous_result, status=status, last_checked=now,
+                last_successful=now if healthy else previous_result.last_successful,
                 error=error_message,
             )
-            if old.status is not status:
+            if previous_result.status is not status:
+                previous_status = (
+                    previous_result.status.name
+                    if previous_result.status is not None else "UNCHECKED"
+                )
                 logger.info(
-                    "[WATCHDOG] %s %s -> %s", key,
-                    old.status.name if old.status is not None else "UNCHECKED",
-                    status.name,
+                    "[WATCHDOG] %s %s -> %s",
+                    service_id, previous_status, status.name,
                 )
 
     async def run(self) -> None:
