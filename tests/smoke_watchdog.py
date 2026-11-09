@@ -22,7 +22,7 @@ def exercise(strategy: str) -> None:
     with tempfile.TemporaryDirectory(prefix="sentinel-watchdog-") as directory:
         def start(role: str):
             log = open(Path(directory) / f"{role}-{len(entries)}.log", "w+")
-            env = {**os.environ, "SERVICE_ID": f"smoke-{role}", "SERVICE_ROLE": role,
+            env = {**os.environ, "DATABASE_PATH": str(Path(directory) / "tasks.db"), "SERVICE_ID": f"smoke-{role}", "SERVICE_ROLE": role,
                    "SERVICE_HOST": "127.0.0.1", "SERVICE_PORT": str(ports[role]),
                    "MAIN_SERVER_ID": "smoke-server", "MAIN_SERVER_URL": "http://127.0.0.1:8000",
                    "HEARTBEAT_INTERVAL": "0.1", "HTTP_TIMEOUT": "0.2",

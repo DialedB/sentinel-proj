@@ -70,6 +70,7 @@ def exercise(timeout: float = 35, base_port: int = 18760) -> None:
             for offset, (identity, role) in enumerate(entries):
                 env = dict(
                     os.environ,
+                    DATABASE_PATH=str(Path(directory) / "tasks.db"),
                     SERVICE_ID=identity,
                     SERVICE_ROLE=role,
                     SERVICE_HOST="127.0.0.1",

@@ -1,6 +1,8 @@
 """Read-only demo, bounded watchdog proxy, and lifespan cleanup contracts."""
 
 import unittest
+import tempfile
+from pathlib import Path
 from dataclasses import replace
 from unittest.mock import patch
 
@@ -14,7 +16,11 @@ from sentinel.core.service import ServerService
 
 class DemoTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.config = ServiceConfig.from_env(ServiceRole.SERVER, {})
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.config = ServiceConfig.from_env(ServiceRole.SERVER, {
+            "DATABASE_PATH": str(Path(directory.name) / "tasks.db"),
+        })
 
     def test_page_and_fixed_proxy_share_lifespan_client(self) -> None:
         requests = []

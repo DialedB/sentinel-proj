@@ -18,6 +18,8 @@ from sentinel.common.transport import (
     Registration,
 )
 from sentinel.server.registry import ServiceRegistry
+from sentinel.storage.task_repository import TaskRepository
+from sentinel.reliability.recovery import recover_once, run_recovery, storage_call
 from sentinel.watchdog.models import CheckResult
 from sentinel.watchdog.monitor import ServiceMonitor
 from sentinel.watchdog.strategies import (
@@ -126,11 +128,15 @@ class BaseService:
 
 
 class ServerService(BaseService):
-    def __init__(self, config: ServiceConfig) -> None:
+    def __init__(
+        self, config: ServiceConfig, repository: TaskRepository | None = None,
+    ) -> None:
         super().__init__(config)
         self.registry = ServiceRegistry()
-        from sentinel.server.tasks import TaskQueue
-        self.tasks = TaskQueue()
+        self.tasks = repository if repository is not None else TaskRepository(
+            config.database_path, lease_seconds=config.task_lease_seconds,
+            max_attempts=config.task_max_attempts,
+        )
 
     def create_app(self) -> FastAPI:
         app = super().create_app()
@@ -167,14 +173,25 @@ class ServerService(BaseService):
 
     @asynccontextmanager
     async def _lifespan(self, app: FastAPI) -> AsyncIterator[None]:
+        await storage_call(self.tasks.initialize)
+        await recover_once(self.tasks)
         async with httpx.AsyncClient(
             timeout=self.config.http_timeout,
             limits=httpx.Limits(max_connections=10, max_keepalive_connections=5),
             follow_redirects=False,
         ) as client:
             app.state.demo_client = client
-            async with super()._lifespan(app):
-                yield
+            recovery = asyncio.create_task(
+                run_recovery(self.tasks, self.config.recovery_interval_seconds),
+                name=f"recovery-{self.service_id}",
+            )
+            try:
+                async with super()._lifespan(app):
+                    yield
+            finally:
+                recovery.cancel()
+                with suppress(asyncio.CancelledError):
+                    await recovery
 
 
 class ProducerService(BaseService):

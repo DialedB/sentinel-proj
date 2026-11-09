@@ -106,6 +106,7 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 await cancel(runner)
         self.assertEqual(client.claim_task.await_count, 1)
+        self.assertEqual(results[0]["lease_token"], str(t.lease_token))
         self.assertEqual(results[0], results[1])
         self.assertEqual(results[1], results[2])
         self.assertEqual(len(threads), 1)
@@ -166,7 +167,7 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
                 await client.submit_result(
                     t.task_id,
                     TaskResult(
-                        worker_id="w", outcome=Failure(status="failure", error="bad")
+                        worker_id="w", lease_token=t.lease_token, outcome=Failure(status="failure", error="bad")
                     ),
                 )
         self.assertTrue(transport.is_closed)

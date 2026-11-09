@@ -1,6 +1,8 @@
 """Phase 5 domain, atomic queue, command and HTTP contracts."""
 
 import unittest
+import tempfile
+from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import datetime, timedelta
@@ -42,6 +44,7 @@ def event(**changes: object) -> SecurityEvent:
 def success(task: Task, worker: str = "w") -> TaskResult:
     return TaskResult(
         worker_id=worker,
+        lease_token=task.lease_token or uuid4(),
         outcome=Success(
             status="success", result=dict(SecurityEvaluator().evaluate(task.event))
         ),
@@ -74,7 +77,7 @@ class DomainTests(unittest.TestCase):
         self.assertEqual(SecurityEvent(**data).timestamp.hour, 0)
 
     def test_explicit_lifecycle_and_no_terminal_transitions(self) -> None:
-        initial = Task(event=event())
+        initial = Task(event=event(), max_attempts=1)
         with self.assertRaises(ValueError):
             initial.claim("w")
         ready = initial.ready()
@@ -83,7 +86,7 @@ class DomainTests(unittest.TestCase):
             running.finish(success(running, "other"))
         complete = running.finish(success(running))
         failed = running.finish(
-            TaskResult(worker_id="w", outcome=Failure(status="failure", error="bad"))
+            TaskResult(worker_id="w", lease_token=running.lease_token, outcome=Failure(status="failure", error="bad"))
         )
         self.assertEqual(complete.state, TaskState.COMPLETED)
         self.assertEqual(failed.state, TaskState.FAILED)
@@ -108,7 +111,7 @@ class DomainTests(unittest.TestCase):
             {"status": "failure", "error": " "},
         ):
             with self.assertRaises(ValidationError):
-                TaskResult(worker_id="w", outcome=outcome)
+                TaskResult(worker_id="w", lease_token=uuid4(), outcome=outcome)
 
     def test_exact_event_contract_and_generator(self) -> None:
         self.assertEqual(
@@ -196,8 +199,15 @@ class DomainTests(unittest.TestCase):
 
 
 class QueueTests(unittest.TestCase):
+    def queue(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        queue = TaskQueue(str(Path(directory.name) / "tasks.db"))
+        queue.initialize()
+        return queue
+
     def test_fifo_dedup_conflicts_and_copy_isolation(self) -> None:
-        q = TaskQueue()
+        q = self.queue()
         e = event()
         first = q.submit(e)
         self.assertEqual(q.submit(e).task_id, first.task_id)
@@ -233,6 +243,7 @@ class QueueTests(unittest.TestCase):
                 completed=1,
                 failed=0,
                 queue_depth=0,
+                attempts=2, retry_attempts=0, recovery_count=0, expired_active=0,
             ),
         )
         snapshot = q.snapshot()
@@ -243,7 +254,7 @@ class QueueTests(unittest.TestCase):
             q.get(uuid4())
 
     def test_concurrent_atomic_claims_and_submissions(self) -> None:
-        q = TaskQueue()
+        q = self.queue()
         e = event()
         with ThreadPoolExecutor(max_workers=16) as pool:
             ids = list(pool.map(lambda _: q.submit(e).task_id, range(100)))
@@ -260,8 +271,11 @@ class QueueTests(unittest.TestCase):
 
 class TaskAPITests(unittest.TestCase):
     def setUp(self) -> None:
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
         self.service = ServerService(
-            ServiceConfig("s", ServiceRole.SERVER, "localhost", 8000, "http://central")
+            ServiceConfig("s", ServiceRole.SERVER, "localhost", 8000, "http://central",
+                          database_path=str(Path(directory.name) / "tasks.db"))
         )
         self.client = TestClient(self.service.create_app())
         self.client.__enter__()
@@ -288,6 +302,7 @@ class TaskAPITests(unittest.TestCase):
         path = "/tasks/" + task["task_id"] + "/result"
         body = dict(
             worker_id="w",
+            lease_token=task["lease_token"],
             outcome=dict(
                 status="success",
                 result=dict(
@@ -331,11 +346,13 @@ class TaskAPITests(unittest.TestCase):
             "/tasks/" + task["task_id"] + "/result",
             json={
                 "worker_id": "w",
+                "lease_token": task["lease_token"],
                 "outcome": {"status": "failure", "error": "unknown command"},
             },
         )
-        self.assertEqual(response.json()["state"], "FAILED")
-        self.assertEqual(self.client.get("/stats").json()["failed"], 1)
+        self.assertEqual(response.json()["state"], "READY")
+        self.assertEqual(response.json()["error"], "unknown command")
+        self.assertEqual(self.client.get("/stats").json()["ready"], 1)
 
 
 class PipelineConfigTests(unittest.TestCase):

@@ -5,6 +5,8 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import FrozenInstanceError, replace
 from datetime import datetime, timedelta
 import unittest
+import tempfile
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import httpx
@@ -61,7 +63,11 @@ class RegistryTests(unittest.TestCase):
 
 class APITests(unittest.TestCase):
     def setUp(self):
-        self.service = ServerFactory().create_service(config(ServiceRole.SERVER))
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.service = ServerFactory().create_service(replace(
+            config(ServiceRole.SERVER), database_path=str(Path(directory.name) / "tasks.db"),
+        ))
         self.client = TestClient(self.service.create_app())
         self.client.__enter__()
         self.addCleanup(self.client.__exit__, None, None, None)

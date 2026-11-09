@@ -29,6 +29,10 @@ class ServiceConfig:
     worker_poll_interval: float = 1.0
     processing_delay: float = 0.0
     watchdog_url: str = "http://127.0.0.1:8005"
+    database_path: str = "data/sentinel.db"
+    task_lease_seconds: float = 30.0
+    task_max_attempts: int = 3
+    recovery_interval_seconds: float = 5.0
 
     @property
     def advertised_host(self) -> str:
@@ -74,13 +78,21 @@ class ServiceConfig:
             float(env.get("WORKER_POLL_INTERVAL", "1")),
             float(env.get("PROCESSING_DELAY", "0")),
             env.get("WATCHDOG_URL", "http://127.0.0.1:8005"),
+            env.get("DATABASE_PATH", "data/sentinel.db"),
+            float(env.get("TASK_LEASE_SECONDS", "30")),
+            int(env.get("TASK_MAX_ATTEMPTS", "3")),
+            float(env.get("RECOVERY_INTERVAL_SECONDS", "5")),
         )
 
     def __post_init__(self) -> None:
-        for name in ("service_id", "host", "server_url", "main_server_id"):
+        for name in ("service_id", "host", "server_url", "main_server_id", "database_path"):
             value = getattr(self, name)
             if not isinstance(value, str) or not value.strip():
                 raise ValueError(f"{name} must be a non-empty string")
+        if self.database_path == ":memory:":
+            raise ValueError("database_path must name a file")
+        if type(self.task_max_attempts) is not int or self.task_max_attempts <= 0:
+            raise ValueError("task_max_attempts must be a positive integer")
         if not isinstance(self.role, ServiceRole):
             raise ValueError("role must be a ServiceRole")
         if type(self.port) is not int or not 1 <= self.port <= 65535:
@@ -100,6 +112,7 @@ class ServiceConfig:
             "heartbeat_interval", "http_timeout", "monitor_interval",
             "health_check_timeout", "heartbeat_timeout",
             "event_generation_interval", "worker_poll_interval",
+            "task_lease_seconds", "recovery_interval_seconds",
         ):
             value = getattr(self, name)
             if (isinstance(value, bool) or not isinstance(value, (int, float))

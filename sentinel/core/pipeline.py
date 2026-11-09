@@ -58,7 +58,10 @@ async def work(config: ServiceConfig, client: ServiceHTTPClient) -> None:
                         outcome = Failure(
                             status="failure", error=str(error) or type(error).__name__
                         )
-                    pending = TaskResult(worker_id=config.service_id, outcome=outcome)
+                    pending = TaskResult(
+                        worker_id=config.service_id, lease_token=task.lease_token,
+                        outcome=outcome,
+                    )
             if pending is not None:
                 assert task is not None
                 await client.submit_result(task.task_id, pending)
@@ -71,7 +74,7 @@ async def work(config: ServiceConfig, client: ServiceHTTPClient) -> None:
             # Neither is a reason to execute again or to block this worker forever.
             if pending is not None and error.response.status_code in (404, 409):
                 logger.warning(
-                    "Discarding unacknowledged terminal result task=%s: %s",
+                    "Discarding stale or unacknowledged result task=%s: %s",
                     task.task_id,
                     error,
                 )
