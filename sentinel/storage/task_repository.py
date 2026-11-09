@@ -2,6 +2,7 @@
 
 import json
 import math
+import sqlite3
 from collections.abc import Callable
 from datetime import datetime, timezone
 from uuid import UUID
@@ -40,7 +41,7 @@ class TaskRepository:
         self.database.initialize()
 
     @staticmethod
-    def _load(row: object) -> Task:
+    def _load(row: sqlite3.Row | None) -> Task:
         if row is None:
             raise KeyError("Unknown task ID")
         return Task.model_validate_json(row["task_json"])
@@ -60,7 +61,9 @@ class TaskRepository:
             error=task.error, recovery_count=task.recovery_count,
         )
 
-    def _save(self, connection, task: Task, *, insert: bool = False) -> Task:
+    def _save(
+        self, connection: sqlite3.Connection, task: Task, *, insert: bool = False,
+    ) -> Task:
         values = self._values(task)
         if insert:
             columns = ", ".join(values)

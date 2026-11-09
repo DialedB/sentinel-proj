@@ -152,3 +152,56 @@ class RepositoryTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.repo.submit(self.event())
         self.assertEqual(self.repo.snapshot(), [])
+
+    def test_persisted_limit_and_failure_details_survive_new_repository_defaults(self):
+        self.repo.submit(self.event())
+        first = self.repo.claim("w")
+        failure = self.repo.finish(first.task_id, self.result(first, failure=True))
+        # Changing defaults affects only newly submitted tasks, never existing tasks.
+        changed = TaskRepository(self.path, max_attempts=1, clock=lambda: self.now)
+        changed.initialize()
+        running = changed.claim("w2")
+        self.assertEqual(running.max_attempts, 3)
+        self.assertEqual(running.attempts, 2)
+        self.assertEqual(running.error, failure.error)
+        self.assertEqual(running.outcome, failure.outcome)
+        finished = changed.finish(running.task_id, self.result(running))
+        self.assertIsNone(finished.error)
+        new = changed.submit(self.event())
+        self.assertEqual(new.max_attempts, 1)
+        running = changed.claim("w")
+        self.assertEqual(changed.finish(new.task_id, self.result(running, failure=True)).state,
+                         TaskState.FAILED)
+
+    def test_concurrent_recovery_once_and_fifo_when_creation_times_tie(self):
+        tasks = [self.repo.submit(self.event()) for _ in range(5)]
+        claimed = [self.repo.claim("w") for _ in tasks]
+        self.assertEqual([t.task_id for t in claimed], [t.task_id for t in tasks])
+        self.now += timedelta(seconds=11)
+        other = self.reopen()
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            counts = list(pool.map(lambda repo: repo.recover_expired(), [self.repo, other]))
+        self.assertEqual(sum(counts), 5)
+        self.assertEqual(self.repo.stats()["recovery_count"], 5)
+        self.assertTrue(all(t.recovery_count == 1 for t in self.repo.snapshot()))
+        self.assertEqual([self.repo.claim("w").task_id for _ in tasks],
+                         [t.task_id for t in tasks])
+
+    def test_conflicting_other_event_fields_and_rejected_success_rollback(self):
+        e = self.event()
+        original = self.repo.submit(e)
+        for changes in ({"source": "other"}, {"event_type": "access_denied"},
+                        {"timestamp": e.timestamp + timedelta(seconds=1)}):
+            with self.assertRaises(ValueError):
+                self.repo.submit(SecurityEvent.model_validate({**e.model_dump(), **changes}))
+            self.assertEqual(self.repo.get(original.task_id), original)
+        running = self.repo.claim("w")
+        before = self.repo.stats()
+        with self.assertRaises(ValueError):
+            self.repo.finish(running.task_id, self.result(
+                running, outcome=Success(status="success", result={"event_id": str(uuid4())})))
+        self.assertEqual(self.repo.get(running.task_id), running)
+        self.assertEqual(self.repo.stats(), before)
+        snapshot = self.repo.snapshot()
+        snapshot[0].event.payload.clear()
+        self.assertEqual(self.repo.get(running.task_id).event.payload, {"n": 1})
