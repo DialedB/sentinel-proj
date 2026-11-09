@@ -147,9 +147,10 @@ class TaskRepository:
         stats.update(total=0, attempts=0, retry_attempts=0, recovery_count=0, expired_active=0)
         for row in rows:
             stats[row["status"].lower()] = row["count"]
-            for key, column in (("total", "count"), ("attempts", "attempts"),
-                                ("retry_attempts", "retries"), ("recovery_count", "recoveries"),
-                                ("expired_active", "expired")):
-                stats[key] += row[column]
+            stats["total"] += row["count"]
+            stats["attempts"] += row["attempts"]
+            stats["retry_attempts"] += row["retries"]
+            stats["recovery_count"] += row["recoveries"]
+            stats["expired_active"] += row["expired"]
         stats["queue_depth"] = stats["ready"]
         return stats

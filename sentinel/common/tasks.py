@@ -132,9 +132,9 @@ class Task(BaseModel):
         if (
             isinstance(result.outcome, Success)
             and self.command == "analyze_security_event"
+            and result.outcome.result.get("event_id") != str(self.event.event_id)
         ):
-            if result.outcome.result.get("event_id") != str(self.event.event_id):
-                raise ValueError("Result event_id does not match task event")
+            raise ValueError("Result event_id does not match task event")
         target = (
             TaskState.COMPLETED
             if isinstance(result.outcome, Success)

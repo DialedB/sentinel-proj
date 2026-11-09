@@ -1,13 +1,14 @@
 """Real application recreation and recovery lifespan contracts, isolated from dev data."""
 
 import asyncio
+import sqlite3
 import tempfile
 import threading
 import unittest
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
@@ -166,8 +167,6 @@ class RecoveryLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(finished.is_set())
 
     async def test_transient_database_error_retries(self):
-        import sqlite3
-        from unittest.mock import Mock
         repo = Mock()
         called = asyncio.Event()
         count = 0
