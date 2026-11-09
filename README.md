@@ -42,7 +42,7 @@ times (not registration/heartbeat health claims), and shows unavailable if the
 watchdog cannot be reached. Like the existing APIs, this demo has no authentication;
 keep it on a trusted local network. The existing Dockerfile includes the HTML.
 
-## Phase 5: security-event pipeline
+## Security-event pipeline (Phases 5–6)
 
 ```mermaid
 flowchart TD
@@ -51,7 +51,7 @@ flowchart TD
     W --> C[WorkerExecutor command registry]
     C --> A[AnalyzeSecurityEventCommand]
     A --> E[Independent SecurityEvaluator]
-    E -->|POST task result with worker_id| S
+    E -->|POST task result with worker_id and lease_token| S
     D[Watchdog strategies] -->|Health and heartbeat observations| S
 ```
 
@@ -98,7 +98,8 @@ in its current state; the same event UUID with different content returns **409**
 Each worker retains its computed success/failure result across transient HTTP
 failures, without re-executing or claiming another task. Result 404/409 is logged
 and released locally (e.g. server restart or lost terminal acknowledgement).
-Unknown commands produce a failure result, not execution retries.
+Unknown commands produce a failure result; central requeues failures while
+attempts remain.
 
 ### Task API
 
@@ -108,17 +109,21 @@ APIs are unchanged. New central endpoints:
 | Method/path | Response |
 | --- | --- |
 | `POST /events` | Validated event → deduplicated READY task (200) |
-| `GET /tasks` | Copied task snapshots, in insertion order |
+| `GET /tasks` | Task snapshots, in creation-time order with stable insertion tie break |
 | `GET /tasks/next?worker_id=worker-1` | Atomically claim oldest READY task; 204 with no body if empty |
 | `GET /tasks/{task_id}` | One task, or 404 |
-| `POST /tasks/{task_id}/result` | Assigned worker's success/failure → terminal task |
-| `GET /stats` | `total`, `pending`, `ready`, `running`, `completed`, `failed`, `queue_depth` |
+| `POST /tasks/{task_id}/result` | Current lease holder's success → COMPLETED; failure → READY or FAILED |
+| `GET /stats` | `total`, `pending`, `ready`, `running`, `completed`, `failed`, `queue_depth`, `attempts`, `retry_attempts`, `recovery_count`, `expired_active` |
 
 Claims and results require an existing registry identity with role WORKER.
 Unknown identity/task returns 404; non-worker identity, wrong owner, invalid state,
-conflicting duplicate event, or mismatched result event ID returns 409. Invalid
+wrong/expired/superseded lease token, conflicting duplicate event, or mismatched
+result event ID returns 409, without modifying the task or counters. Invalid
 request schemas return 422. An analysis success must include the task's event ID.
-Results use a discriminated `outcome`: either `status=success` with a result dict,
+Every result requires the UUID `lease_token` returned by its claim (missing/invalid
+token is 422). Upgrade central and all worker clients together: old clients that
+omit the token can no longer submit results. Results use a discriminated `outcome`: either `status=success`
+with a result dict,
 or `status=failure` with a nonblank error, never both.
 
 Example (stop automatic workers if you want to claim this task manually):
@@ -131,20 +136,24 @@ curl --fail --max-time 3 http://127.0.0.1:8000/events \
   -H 'Content-Type: application/json' \
   -d '{"event_id":"a0000000-0000-4000-8000-000000000001","source":"manual-producer","event_type":"login_failed","timestamp":"2026-11-05T12:00:00Z","payload":{"user":"fictional-alex","source_ip":"192.0.2.10"}}'
 curl --fail --max-time 3 'http://127.0.0.1:8000/tasks/next?worker_id=manual-worker'
-# Replace TASK_UUID with the returned task_id. Use the claimed event's event_id.
+# Replace TASK_UUID and LEASE_UUID with the claim's task_id and lease_token.
+# Submit before lease_expires_at. Use the claimed event's event_id.
 curl --fail --max-time 3 http://127.0.0.1:8000/tasks/TASK_UUID/result \
   -H 'Content-Type: application/json' \
-  -d '{"worker_id":"manual-worker","outcome":{"status":"success","result":{"event_id":"a0000000-0000-4000-8000-000000000001","classification":"SUSPICIOUS","risk_score":40,"triggered_rule":"login_failed","processing_timestamp":"2026-11-05T12:00:01Z"}}}'
+  -d '{"worker_id":"manual-worker","lease_token":"LEASE_UUID","outcome":{"status":"success","result":{"event_id":"a0000000-0000-4000-8000-000000000001","classification":"SUSPICIOUS","risk_score":40,"triggered_rule":"login_failed","processing_timestamp":"2026-11-05T12:00:01Z"}}}'
 # Alternative failure body:
-# {"worker_id":"manual-worker","outcome":{"status":"failure","error":"analysis failed"}}
+# {"worker_id":"manual-worker","lease_token":"LEASE_UUID","outcome":{"status":"failure","error":"analysis failed"}}
 curl --fail --max-time 3 http://127.0.0.1:8000/stats
 ```
 
 Lifecycle is `PENDING → READY → RUNNING → COMPLETED | FAILED`. Ingestion creates
 READY immediately; PENDING is a domain construction state. Explicit transition
-methods reject skipped/repeated/terminal transitions. A process-local lock protects
-deduplication, queue operations, claims, results, and stats. Returned nested models
-are deep copies, and transition methods return new tasks without mutating originals.
+methods reject skipped/repeated/terminal transitions. Failures and expired leases
+return RUNNING tasks to READY while attempts remain; otherwise they become FAILED.
+Only the explicit recovery operation can reclaim an expired lease. SQLite
+transactions protect deduplication, claims, result validation, and recovery.
+Returned nested models are independent snapshots, and transition methods return new
+tasks without mutating originals.
 
 ### Verification and intentional limits
 
@@ -162,14 +171,80 @@ watchdog observations. It verifies the exact event and result fields, all three
 classifications, risk scores, triggered rules, and aware UTC processing timestamps.
 It always terminates and awaits its children, with a kill fallback. Default ports are 18760–18765. The existing Phase 2/3/4 smokes remain valid.
 
-This is a single-server, single-uvicorn-process educational design. There is **no
-persistence, queue bound/retention policy, worker authentication, lease, timeout
-reclaim, reassignment, or execution retry**. Server restart loses all tasks and
-deduplication history. Worker death can leave RUNNING tasks forever; graceful
-shutdown can discard a local pending event/result. Registry identities and submitted
-results are simplistically trusted, not proof of execution or authorization. Do not
-expose these APIs to untrusted clients. Multiple server processes would have separate
-queues and registries; do not add uvicorn workers. No Phase 6 infrastructure is added.
+## Phase 6: durable tasks, leases, and bounded retries
+
+`storage/database.py` initializes an idempotent SQLite schema and indexes, with WAL,
+a 5-second busy timeout, and short-lived connections. `storage/task_repository.py`
+is the single source of truth; `server/tasks.py` retains the `TaskQueue` import as
+an alias, not a second queue. Direct callers supply a file path and call
+`initialize()`; service/factory construction does no filesystem I/O. Server
+lifespan initializes storage and recovers expired leases before becoming healthy.
+Task routes run in FastAPI's thread pool; startup and periodic recovery use
+`asyncio.to_thread`, so SQLite work does not block the event loop. Teardown cancels
+and awaits recovery, including any in-flight transaction, before returning.
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `DATABASE_PATH` | `data/sentinel.db` | SQLite file; parents created at startup; central only |
+| `TASK_LEASE_SECONDS` | `30` | Finite positive seconds per claim; no renewal |
+| `TASK_MAX_ATTEMPTS` | `3` | Strict positive integer, persisted per task at submission |
+| `RECOVERY_INTERVAL_SECONDS` | `5` | Finite positive seconds between recovery scans |
+
+Atomic `BEGIN IMMEDIATE` transactions serialize submission/deduplication, FIFO
+claims, results, and recovery across connections/repository instances. FIFO uses
+creation time with a stable insertion-sequence tie breaker. Canonical JSON compares
+all event fields and distinguishes JSON field types (`true`, `1`, `1.0`, and `"1"`
+are different). Resubmission after restart returns the original task ID, state,
+and outcome. Tasks retain the complete event and current outcome, attempts/limit,
+lease, UTC timestamps, last error, and cumulative recovery count in SQLite.
+
+Each claim increments `attempts` and assigns a fresh UUID token and UTC expiry.
+Results require RUNNING state, assigned worker, matching token, and an unexpired
+lease at transaction time. Expiry is inclusive (`now >= lease_expires_at`).
+Success becomes COMPLETED; execution failure is saved and requeued if attempts
+remain, otherwise FAILED. Recovery clears ownership/token/expiry and requeues or
+fails expired tasks using the same persisted limit. Repeated scans are idempotent.
+Terminal tasks are immutable. Last failure outcome/error is retained during READY
+and RUNNING retries; a successful result replaces the outcome and clears the error.
+Lease-expiry recovery records `Task lease expired`. Completed tasks retain their
+finishing worker identity for inspection, but no active token/expiry.
+
+`/stats` returns current-state counts and `queue_depth=ready`, plus durable
+`attempts=sum(attempts)`, `retry_attempts=sum(max(attempts-1, 0))`, and
+`recovery_count=sum(recovery_count)`. `expired_active` counts RUNNING leases expired
+at read time, before recovery. These are task-lifetime counters, not process-local
+metrics; rejected submissions/results do not increment them.
+
+Delivery is **at least once**, not exactly-once execution. A worker can execute
+before dying or losing its lease; a new attempt may execute again. The current
+analysis has no external side effects. Future commands must make side effects
+idempotent. There is no lease renewal, backoff, retention policy, authentication,
+or external broker. Keep execution plus result delivery comfortably below the
+lease duration; configure a longer central lease for longer commands. Set demo
+`PROCESSING_DELAY` below that lease (for example 4 seconds with a 6-second lease,
+`RECOVERY_INTERVAL_SECONDS=1`, and sufficient network/execution margin).
+
+The registry remains in memory: after central restart workers/producers re-register
+through the existing heartbeat-404 path. Task IDs, outcomes, deduplication, and
+attempts survive independently. Run one central uvicorn process: shared SQLite
+transactions do not make the process-local registry a multi-server architecture.
+Local data is ignored by Git and excluded from the image build context. Tests and
+all local smoke harnesses supply temporary database paths, never the dev database.
+Back up a live database with SQLite's backup API (do not copy only the `.db` file
+while WAL writes are active). No pre-Phase-6 task migration exists because those
+tasks lived only in memory.
+
+```bash
+.venv/bin/python tests/smoke_recovery.py --base-port 18960 --timeout 60
+```
+
+This bounded six-process smoke verifies both producers, both workers, all three
+classifications, six health endpoints, five watchdog observations, and advancing
+heartbeats. It kills a worker after a real claim, restarts central against the same
+temporary database, observes reassignment with a fresh token and incremented
+attempt, rejects the old token with 409, and restarts central again to verify the
+same completed IDs/outcomes and deduplication. It always stops/awaits its own child
+processes and removes its temporary database; it never controls existing services.
 
 ## Phase 4: Docker Compose
 
@@ -212,7 +287,13 @@ Communication is HTTP over Docker DNS on the named bridge `sentinel-network`;
 This is an isolated application network, not an authentication or egress security
 boundary. Only central and watchdog publish ports, bound to host loopback at
 `127.0.0.1:8000` and `127.0.0.1:8005`. Producers/workers are reachable inside the
-network only. No Docker socket, volumes, or restart policies are configured.
+network only. No Docker socket or restart policy is configured. Only main-server
+mounts the named `sentinel-data` volume at `/app/data`, using
+`DATABASE_PATH=/app/data/sentinel.db`. The image creates that directory owned by
+UID/GID 10001 before switching to its non-root user. Fresh volumes inherit that
+ownership; an existing externally managed volume must be writable by UID 10001.
+Container recreation and ordinary `docker compose down` preserve this volume.
+Do not use volume-removal flags unless intentionally deleting all durable tasks.
 The local instructions below retain central ID `server-1`; Compose uses
 `main-server`. Both workflows use `producer-1`, `producer-2`, `worker-1`, and
 `worker-2`. Use the central identity appropriate to the chosen workflow.
@@ -261,7 +342,9 @@ flags become false, but the four live producer/worker HTTP checks remain healthy
 The normal smoke is intentionally expected to fail during outages. After central
 starts, its empty in-memory registry is repopulated automatically: producer/worker
 heartbeats receive 404 and trigger re-registration. Discovery and all five healthy
-statuses recover. Expected connection/discovery failures are logged during outages.
+statuses recover. Durable tasks and outcomes remain available with the same IDs;
+expired RUNNING leases are recovered on startup or a later scan. Expected
+connection/discovery failures are logged during outages.
 
 Python is PID 1 and receives Docker's SIGTERM directly. Existing lifespan teardown
 cancels/awaits background tasks and closes HTTP clients; Compose allows ten seconds
@@ -274,6 +357,7 @@ Cleanup only the stack you started (do not stop unrelated projects):
 
 ```bash
 docker compose down --timeout 10
+# Keep sentinel-data; do not add volume-removal flags.
 # Optional: remove the shared local image after cleanup.
 docker image rm sentinel:phase4
 ```
@@ -393,6 +477,8 @@ restart, producers/workers re-register and monitoring recovers automatically.
   original domain types, validated transport contracts.
 - `common/http_client.py`: reusable registration/heartbeat transport.
 - `server/registry.py`: lock-protected in-memory registry.
+- `storage/database.py`, `task_repository.py`: SQLite setup and transactional durable queue.
+- `reliability/recovery.py`: cancellation-safe periodic expired-lease recovery.
 - `core/factory.py`: existing Factory Method creators; construction has no I/O.
 - `core/service.py`: `create_app()`, APIs and lifespan ownership. WatchdogService
   composes a `ServiceMonitor` while retaining the factory-created role classes.
@@ -426,6 +512,6 @@ records never automatically expire or disappear; the watchdog reports observatio
 without mutating central registry status. Checks are sequential: large fleets can
 make cycles slow, and interval is added after each cycle. HTTP timeouts bound
 network operations, not a strict whole-cycle deadline. There is no authentication,
-TLS configuration, persistence, or automatic restart support. This is a development
-system and should not be exposed to untrusted networks. Registration addresses
+TLS configuration, registry/watchdog persistence, or automatic process restart
+support. This is a development system and should not be exposed to untrusted networks. Registration addresses
 are trusted configuration.

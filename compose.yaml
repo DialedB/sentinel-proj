@@ -34,9 +34,15 @@ services:
     environment:
       <<: *environment
       SERVICE_ID: main-server
+      DATABASE_PATH: /app/data/sentinel.db
+      TASK_LEASE_SECONDS: "30"
+      TASK_MAX_ATTEMPTS: "3"
+      RECOVERY_INTERVAL_SECONDS: "5"
       WATCHDOG_URL: http://watchdog:8000
       SERVICE_ROLE: server
       SERVICE_ADVERTISE_HOST: main-server
+    volumes:
+      - sentinel-data:/app/data
     ports:
       - "127.0.0.1:8000:8000"
     healthcheck: *healthcheck
@@ -107,6 +113,9 @@ services:
     depends_on:
       main-server:
         condition: service_healthy
+
+volumes:
+  sentinel-data:
 
 networks:
   sentinel-network:

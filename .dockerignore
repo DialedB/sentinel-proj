@@ -15,3 +15,7 @@ secrets
 secrets/**
 tests
 scripts
+data
+**/*.db
+**/*.db-wal
+**/*.db-shm
