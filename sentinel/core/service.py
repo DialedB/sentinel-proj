@@ -157,6 +157,8 @@ class ServerService(BaseService):
         app.state.tasks = self.tasks
         from sentinel.server.task_routes import install_task_routes
         install_task_routes(app, self.tasks, self.registry)
+        from sentinel.server.event_routes import install_event_routes
+        install_event_routes(app, self.events, self.tasks, self.projections)
         from sentinel.server.demo import install_demo_routes
         install_demo_routes(app, self.config)
 
