@@ -45,6 +45,21 @@ class Database:
                     timestamp TEXT NOT NULL,
                     payload TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS subscriber_receipts (
+                    subscriber_id TEXT NOT NULL,
+                    event_id TEXT NOT NULL REFERENCES task_events(event_id),
+                    PRIMARY KEY(subscriber_id, event_id)
+                );
+                CREATE TABLE IF NOT EXISTS event_metrics (
+                    singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+                    created INTEGER NOT NULL DEFAULT 0,
+                    started INTEGER NOT NULL DEFAULT 0,
+                    completed INTEGER NOT NULL DEFAULT 0,
+                    permanently_failed INTEGER NOT NULL DEFAULT 0,
+                    requeued INTEGER NOT NULL DEFAULT 0,
+                    retry_attempts INTEGER NOT NULL DEFAULT 0
+                );
+                INSERT OR IGNORE INTO event_metrics(singleton) VALUES (1);
                 CREATE TABLE IF NOT EXISTS event_deliveries (
                     event_id TEXT NOT NULL REFERENCES task_events(event_id),
                     subscriber_id TEXT NOT NULL,

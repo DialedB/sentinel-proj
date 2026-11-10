@@ -22,6 +22,8 @@ from sentinel.storage.task_repository import TaskRepository
 from sentinel.storage.event_repository import EventRepository
 from sentinel.core.event_bus import EventBus
 from sentinel.reliability.event_dispatcher import EventDispatcher
+from sentinel.storage.event_projections import EventProjections
+from sentinel.observers.metrics import MetricsSubscriber
 from sentinel.reliability.recovery import recover_once, run_recovery, storage_call
 from sentinel.watchdog.models import CheckResult
 from sentinel.watchdog.monitor import ServiceMonitor
@@ -143,6 +145,8 @@ class ServerService(BaseService):
         )
         self.events = EventRepository(self.tasks.database)
         self.event_bus = event_bus if event_bus is not None else EventBus()
+        self.projections = EventProjections(self.tasks.database)
+        self.event_bus.register(MetricsSubscriber(self.projections))
         self.dispatcher = EventDispatcher(self.events, self.event_bus)
 
     def create_app(self) -> FastAPI:
