@@ -11,6 +11,7 @@ from sentinel.storage.database import Database
 from sentinel.storage.event_repository import EventRepository, insert_event
 from sentinel.storage.event_projections import EventProjections, METRICS_SUBSCRIBER_ID
 from sentinel.observers.metrics import MetricsSubscriber
+from sentinel.observers.audit import AuditSubscriber
 from tests.test_events import event
 
 
@@ -68,6 +69,31 @@ class ProjectionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.projections.metrics_snapshot(), self.expected)
         self.projections.apply_metrics(fresh)
         self.assertEqual(self.projections.metrics_snapshot()["created"], 2)
+
+    async def test_audit_structured_json_receipts_restart_and_failure(self):
+        import json
+        subscriber = AuditSubscriber(self.projections)
+        first = self.events[0]
+        with self.assertLogs("sentinel.observers.audit", level="INFO") as captured:
+            await subscriber.handle(first)
+            await AuditSubscriber(EventProjections(Database(self.db.path))).handle(first)
+        self.assertEqual(len(captured.records), 1)
+        payload = json.loads(captured.records[0].getMessage())
+        self.assertEqual(payload["task_id"], str(first.task_id))
+        self.assertEqual(payload["event_type"], "task.created")
+        self.assertEqual(payload["payload"]["attempts"], 0)
+        self.assertIn("timestamp", payload)
+        self.assertNotIn("lease_token", captured.records[0].getMessage())
+        with patch.object(self.projections, "receipt", side_effect=sqlite3.OperationalError("busy")):
+            with self.assertRaises(sqlite3.OperationalError):
+                await subscriber.handle(self.events[1])
+        with self.assertLogs("sentinel.observers.audit", level="INFO") as retry:
+            await subscriber.handle(self.events[1])
+        self.assertEqual(len(retry.records), 1)
+        self.projections.rebuild_metrics()
+        with patch("sentinel.observers.audit.logger.info") as log:
+            await subscriber.handle(first)
+        log.assert_not_called()
 
     def test_rebuild_leaves_delivery_acknowledgements_unchanged(self):
         repo = EventRepository(self.db)
