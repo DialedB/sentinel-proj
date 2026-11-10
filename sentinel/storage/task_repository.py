@@ -9,6 +9,8 @@ from uuid import UUID
 
 from sentinel.common.tasks import SecurityEvent, Success, Task, TaskResult, TaskState, utcnow
 from sentinel.storage.database import Database
+from sentinel.core.events import LifecycleMetadata, TaskEventType, TaskLifecycleEvent
+from sentinel.storage.event_repository import insert_event
 
 
 def canonical(value: object) -> str:
@@ -63,6 +65,7 @@ class TaskRepository:
 
     def _save(
         self, connection: sqlite3.Connection, task: Task, *, insert: bool = False,
+                event_type: TaskEventType, reason: str, previous: Task | None = None,
     ) -> Task:
         values = self._values(task)
         if insert:
@@ -72,6 +75,19 @@ class TaskRepository:
         else:
             assignments = ", ".join(f"{key}=:{key}" for key in values if key != "task_id")
             connection.execute(f"UPDATE tasks SET {assignments} WHERE task_id=:task_id", values)
+        metadata = LifecycleMetadata(
+            security_event_id=task.event.event_id, source=task.event.source,
+            command=task.command, worker_id=(previous.worker_id if previous else task.worker_id),
+            attempts=task.attempts, max_attempts=task.max_attempts,
+            recovery_count=task.recovery_count, reason=reason, error=task.error,
+            lease_expires_at=task.lease_expires_at,
+        )
+        types = (TaskEventType.CREATED, TaskEventType.READY) if insert else (event_type,)
+        for kind in types:
+            insert_event(connection, TaskLifecycleEvent(
+                task_id=task.task_id, event_type=kind, timestamp=task.updated_at,
+                payload=metadata,
+            ))
         return task
 
     def submit(self, event: SecurityEvent) -> Task:
@@ -87,7 +103,8 @@ class TaskRepository:
             now = self._now()
             task = Task(event=event.model_copy(deep=True), max_attempts=self.max_attempts,
                         created_at=now, updated_at=now).ready(now)
-            return self._save(connection, task, insert=True)
+            return self._save(connection, task, insert=True,
+                                          event_type=TaskEventType.READY, reason="submitted")
 
     def claim(self, worker_id: str) -> Task | None:
         if not isinstance(worker_id, str) or not worker_id.strip():
@@ -99,15 +116,26 @@ class TaskRepository:
             if row is None:
                 return None
             task = self._load(row).claim(worker_id, self.lease_seconds, self._now())
-            return self._save(connection, task)
+            return self._save(connection, task, event_type=TaskEventType.STARTED,
+                              reason="claimed")
 
     def finish(self, task_id: UUID, result: TaskResult) -> Task:
         with self.database.connection(write=True) as connection:
             row = connection.execute(
                 "SELECT * FROM tasks WHERE task_id=?", (str(task_id),)
             ).fetchone()
-            task = self._load(row).finish(result, self._now())
-            return self._save(connection, task)
+            previous = self._load(row)
+            task = previous.finish(result, self._now())
+            return self._save(connection, task, previous=previous,
+                              event_type=self._finished_type(task),
+                              reason="completed" if task.state == TaskState.COMPLETED
+                              else "execution_failed")
+
+    @staticmethod
+    def _finished_type(task: Task) -> TaskEventType:
+        return {TaskState.COMPLETED: TaskEventType.COMPLETED,
+                TaskState.READY: TaskEventType.REQUEUED,
+                TaskState.FAILED: TaskEventType.FAILED}[task.state]
 
     def recover_expired(self) -> int:
         with self.database.connection(write=True) as connection:
@@ -117,7 +145,10 @@ class TaskRepository:
                 (now.isoformat(),),
             ).fetchall()
             for row in rows:
-                self._save(connection, self._load(row).recover_expired(now))
+                previous = self._load(row)
+                task = previous.recover_expired(now)
+                self._save(connection, task, previous=previous,
+                           event_type=self._finished_type(task), reason="lease_expired")
             return len(rows)
 
     def get(self, task_id: UUID) -> Task:
