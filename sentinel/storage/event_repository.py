@@ -3,7 +3,8 @@
 import sqlite3
 from uuid import UUID
 
-from sentinel.core.events import LifecycleMetadata, TaskLifecycleEvent
+from sentinel.core.events import LifecycleMetadata, TaskLifecycleEvent, TaskEventType
+from sentinel.common.tasks import utcnow
 from sentinel.storage.database import Database
 
 
@@ -54,3 +55,44 @@ class EventRepository:
                 (*params, limit),
             )]
         return events if after_sequence is not None else list(reversed(events))
+
+    def seed_deliveries(
+        self, targets: dict[str, frozenset[TaskEventType | None]],
+    ) -> None:
+        # The scan and insert share one writer snapshot. Later appends are picked up
+        # next pass, including events committed while the server was stopped.
+        with self.database.connection(write=True) as connection:
+            for identity, types in targets.items():
+                if not types:
+                    continue
+                params = tuple(kind.value for kind in types if kind is not None)
+                where = "" if None in types else (
+                    " WHERE event_type IN (" + ",".join("?" for _ in params) + ")"
+                )
+                connection.execute(
+                    "INSERT OR IGNORE INTO event_deliveries(event_id, subscriber_id) "
+                    "SELECT event_id, ? FROM task_events" + where,
+                    (identity,) if None in types else (identity, *params),
+                )
+
+    def pending(self, subscriber_id: str, *, limit: int = 100) -> list[TaskLifecycleEvent]:
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise ValueError("batch limit must be between 1 and 100")
+        with self.database.connection() as connection:
+            return [load_event(row) for row in connection.execute(
+                "SELECT e.* FROM task_events e JOIN event_deliveries d "
+                "ON e.event_id=d.event_id WHERE d.subscriber_id=? "
+                "AND d.delivered_at IS NULL ORDER BY e.sequence LIMIT ?",
+                (subscriber_id, limit),
+            )]
+
+    def record_delivery(
+        self, event_id: UUID, subscriber_id: str, *, success: bool, error: str | None = None,
+    ) -> None:
+        with self.database.connection(write=True) as connection:
+            connection.execute(
+                "UPDATE event_deliveries SET attempts=attempts+1, last_error=?, delivered_at=? "
+                "WHERE event_id=? AND subscriber_id=? AND delivered_at IS NULL",
+                (None if success else error, utcnow().isoformat() if success else None,
+                 str(event_id), subscriber_id),
+            )

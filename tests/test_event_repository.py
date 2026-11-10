@@ -41,3 +41,33 @@ class EventRepositoryTests(unittest.TestCase):
         for arguments in ({"limit": 0}, {"limit": 201}, {"after_sequence": -1}):
             with self.assertRaises(ValueError):
                 self.repo.list_events(**arguments)
+
+    def test_independent_ack_failure_restart_and_late_target_backlog(self):
+        from sentinel.core.events import TaskEventType
+        with self.db.connection(write=True) as connection:
+            first = insert_event(connection, event())
+            second = insert_event(connection, event(event_type="task.ready"))
+        targets = {"metrics": frozenset({None}),
+                   "audit": frozenset({TaskEventType.CREATED})}
+        self.repo.seed_deliveries(targets)
+        self.repo.seed_deliveries(targets)
+        self.assertEqual(self.repo.pending("metrics"), [first, second])
+        self.assertEqual(self.repo.pending("audit"), [first])
+        self.repo.record_delivery(first.event_id, "audit", success=True)
+        self.repo.record_delivery(first.event_id, "metrics", success=False, error="offline")
+        reopened = EventRepository(Database(self.db.path))
+        reopened.seed_deliveries({})
+        self.assertEqual(reopened.pending("audit"), [])
+        self.assertEqual(reopened.pending("metrics"), [first, second])
+        with self.db.connection() as connection:
+            row = connection.execute("SELECT * FROM event_deliveries WHERE subscriber_id='metrics' "
+                                     "AND event_id=?", (str(first.event_id),)).fetchone()
+        self.assertEqual((row["attempts"], row["last_error"]), (1, "offline"))
+        reopened.record_delivery(first.event_id, "metrics", success=True)
+        self.assertEqual(reopened.pending("metrics"), [second])
+        with self.db.connection(write=True) as connection:
+            third = insert_event(connection, event())
+        reopened.seed_deliveries({"late": frozenset({None})})
+        self.assertEqual(reopened.pending("late"), [first, second, third])
+        reopened.seed_deliveries(targets)
+        self.assertEqual(reopened.pending("metrics"), [second, third])

@@ -45,6 +45,16 @@ class Database:
                     timestamp TEXT NOT NULL,
                     payload TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS event_deliveries (
+                    event_id TEXT NOT NULL REFERENCES task_events(event_id),
+                    subscriber_id TEXT NOT NULL,
+                    delivered_at TEXT,
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    last_error TEXT,
+                    PRIMARY KEY(event_id, subscriber_id)
+                );
+                CREATE INDEX IF NOT EXISTS event_deliveries_pending
+                    ON event_deliveries(subscriber_id, delivered_at, event_id);
                 CREATE INDEX IF NOT EXISTS task_events_task
                     ON task_events(task_id, sequence);
                 CREATE TRIGGER IF NOT EXISTS task_events_no_update
@@ -65,6 +75,7 @@ class Database:
         connection.row_factory = sqlite3.Row
         try:
             connection.execute("PRAGMA busy_timeout=5000")
+            connection.execute("PRAGMA foreign_keys=ON")
             if write:
                 connection.execute("BEGIN IMMEDIATE")
             yield connection
