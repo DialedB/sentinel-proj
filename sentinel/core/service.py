@@ -19,6 +19,9 @@ from sentinel.common.transport import (
 )
 from sentinel.server.registry import ServiceRegistry
 from sentinel.storage.task_repository import TaskRepository
+from sentinel.storage.event_repository import EventRepository
+from sentinel.core.event_bus import EventBus
+from sentinel.reliability.event_dispatcher import EventDispatcher
 from sentinel.reliability.recovery import recover_once, run_recovery, storage_call
 from sentinel.watchdog.models import CheckResult
 from sentinel.watchdog.monitor import ServiceMonitor
@@ -130,6 +133,7 @@ class BaseService:
 class ServerService(BaseService):
     def __init__(
         self, config: ServiceConfig, repository: TaskRepository | None = None,
+        *, event_bus: EventBus | None = None,
     ) -> None:
         super().__init__(config)
         self.registry = ServiceRegistry()
@@ -137,6 +141,9 @@ class ServerService(BaseService):
             config.database_path, lease_seconds=config.task_lease_seconds,
             max_attempts=config.task_max_attempts,
         )
+        self.events = EventRepository(self.tasks.database)
+        self.event_bus = event_bus if event_bus is not None else EventBus()
+        self.dispatcher = EventDispatcher(self.events, self.event_bus)
 
     def create_app(self) -> FastAPI:
         app = super().create_app()
@@ -185,13 +192,17 @@ class ServerService(BaseService):
                 run_recovery(self.tasks, self.config.recovery_interval_seconds),
                 name=f"recovery-{self.service_id}",
             )
+            dispatch = asyncio.create_task(
+                self.dispatcher.run(self.config.event_dispatch_interval),
+                name=f"events-{self.service_id}",
+            )
             try:
                 async with super()._lifespan(app):
                     yield
             finally:
                 recovery.cancel()
-                with suppress(asyncio.CancelledError):
-                    await recovery
+                dispatch.cancel()
+                await asyncio.gather(recovery, dispatch, return_exceptions=True)
 
 
 class ProducerService(BaseService):

@@ -33,6 +33,7 @@ class ServiceConfig:
     task_lease_seconds: float = 30.0
     task_max_attempts: int = 3
     recovery_interval_seconds: float = 5.0
+    event_dispatch_interval: float = 1.0
 
     @property
     def advertised_host(self) -> str:
@@ -83,6 +84,7 @@ class ServiceConfig:
             task_lease_seconds=float(env.get("TASK_LEASE_SECONDS", "30")),
             task_max_attempts=int(env.get("TASK_MAX_ATTEMPTS", "3")),
             recovery_interval_seconds=float(env.get("RECOVERY_INTERVAL_SECONDS", "5")),
+            event_dispatch_interval=float(env.get("EVENT_DISPATCH_INTERVAL", "1")),
         )
 
     def __post_init__(self) -> None:
@@ -113,7 +115,7 @@ class ServiceConfig:
             "heartbeat_interval", "http_timeout", "monitor_interval",
             "health_check_timeout", "heartbeat_timeout",
             "event_generation_interval", "worker_poll_interval",
-            "task_lease_seconds", "recovery_interval_seconds",
+            "task_lease_seconds", "recovery_interval_seconds", "event_dispatch_interval",
         ):
             value = getattr(self, name)
             if (isinstance(value, bool) or not isinstance(value, (int, float))
