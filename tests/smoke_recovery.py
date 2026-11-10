@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import socket
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -16,7 +17,8 @@ from uuid import uuid4
 from smoke_pipeline import ROOT, get, verify_result
 
 
-def exercise(timeout=60, base_port=18960):
+def exercise(timeout=60, base_port=18960, *, lifecycle=False):
+    dispatch_interval = "3600" if lifecycle else ".05"
     entries = [("server-1", "server"), ("producer-1", "producer"),
                ("producer-2", "producer"), ("worker-1", "worker"),
                ("worker-2", "worker"), ("watchdog", "watchdog")]
@@ -37,6 +39,7 @@ def exercise(timeout=60, base_port=18960):
                        DATABASE_PATH=str(Path(directory) / "tasks.db"),
                        TASK_LEASE_SECONDS="3", TASK_MAX_ATTEMPTS="3",
                        RECOVERY_INTERVAL_SECONDS=".1", HEARTBEAT_INTERVAL=".1",
+                       EVENT_DISPATCH_INTERVAL=dispatch_interval,
                        HTTP_TIMEOUT=".5", MONITOR_INTERVAL=".1",
                        HEALTH_CHECK_TIMEOUT=".5", HEARTBEAT_TIMEOUT="2",
                        HEALTH_CHECK_STRATEGY="http", EVENT_GENERATION_INTERVAL=".6",
@@ -119,6 +122,13 @@ def exercise(timeout=60, base_port=18960):
             assert old["worker_id"] == "worker-1" and old["attempts"] == 1
             stop(3, kill=True)
             stop(0)
+            if lifecycle:
+                with sqlite3.connect(Path(directory) / "tasks.db") as connection:
+                    backlog = connection.execute("SELECT COUNT(*) FROM task_events").fetchone()[0]
+                    projected = connection.execute("SELECT created FROM event_metrics").fetchone()[0]
+                assert backlog > 0 and projected == 0
+                print(f"Committed backlog before restart: {backlog} events, zero projected creations")
+                dispatch_interval = ".05"
             start(0)
             eventually(lambda: get(base_port, "/health"))
             assert get(base_port, f'/tasks/{complete["task_id"]}') == complete
@@ -144,11 +154,50 @@ def exercise(timeout=60, base_port=18960):
                                    if (t := get(base_port, path)) else None)
             verify_result(recovered)
             assert recovered["attempts"] == 2 and recovered["recovery_count"] == 1
+            history = get(base_port, path + "/events?after_sequence=0")
+            assert [e["event_type"] for e in history] == [
+                "task.created", "task.ready", "task.started", "task.requeued",
+                "task.started", "task.completed"]
+            assert history[3]["payload"]["reason"] == "lease_expired"
+            assert [e["payload"]["attempts"] for e in history] == [0, 0, 1, 1, 2, 2]
+            assert all("lease_token" not in e["payload"] for e in history)
+            if lifecycle:
+                def projection_caught_up():
+                    events, cursor = [], 0
+                    while True:
+                        page = get(base_port, f"/events/lifecycle?limit=200&after_sequence={cursor}")
+                        if not page:
+                            break
+                        events.extend(page)
+                        cursor = page[-1]["sequence"]
+                    assert len({e["event_id"] for e in events}) == len(events)
+                    expected = {key: 0 for key in ("created", "started", "completed",
+                                                  "permanently_failed", "requeued", "retry_attempts")}
+                    for item in events:
+                        kind = item["event_type"].split(".")[1]
+                        if kind != "ready":
+                            expected["permanently_failed" if kind == "failed" else kind] += 1
+                        if kind == "started" and item["payload"]["attempts"] > 1:
+                            expected["retry_attempts"] += 1
+                    assert get(base_port, "/metrics/events") == expected
+                    with sqlite3.connect(Path(directory) / "tasks.db") as connection:
+                        connection.execute("BEGIN")
+                        receipts = connection.execute("SELECT COUNT(*) FROM subscriber_receipts").fetchone()[0]
+                        acked = connection.execute("SELECT COUNT(*) FROM event_deliveries "
+                                                   "WHERE delivered_at IS NOT NULL").fetchone()[0]
+                    assert receipts == acked == 2 * len(events)
+                    return dict(event_count=len(events), receipts=receipts,
+                                acknowledgements=acked, metrics=expected)
+                evidence = eventually(projection_caught_up)
             stop(0)
             start(0)
             eventually(lambda: get(base_port, "/health"))
             assert get(base_port, path) == recovered
             assert post("/events", event) == recovered
+            assert get(base_port, path + "/events?after_sequence=0") == history
+            if lifecycle:
+                assert eventually(projection_caught_up) == evidence
+                print(json.dumps(dict(lifecycle_replay=evidence, restart_idempotent=True), indent=2))
             for offset in (1, 2, 3):
                 start(offset)
             beats = eventually(fleet)
