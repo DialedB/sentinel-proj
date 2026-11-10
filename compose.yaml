@@ -38,6 +38,7 @@ services:
       TASK_LEASE_SECONDS: "30"
       TASK_MAX_ATTEMPTS: "3"
       RECOVERY_INTERVAL_SECONDS: "5"
+      EVENT_DISPATCH_INTERVAL: "1"
       WATCHDOG_URL: http://watchdog:8000
       SERVICE_ROLE: server
       SERVICE_ADVERTISE_HOST: main-server

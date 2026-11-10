@@ -246,6 +246,187 @@ attempt, rejects the old token with 409, and restarts central again to verify th
 same completed IDs/outcomes and deduplication. It always stops/awaits its own child
 processes and removes its temporary database; it never controls existing services.
 
+## Phase 7: lifecycle Observer and SQLite outbox
+
+Task lifecycle history is separate from producer `SecurityEvent` activity. A
+`TaskLifecycleEvent` has its own UUID `event_id`, the task UUID `task_id`, a
+`TaskEventType`, an aware UTC `timestamp`, immutable structured `payload`, and the
+persisted integer `sequence`. The producer UUID is `payload.security_event_id`;
+none of these IDs are interchangeable. Sequence, not timestamp, orders history.
+
+```mermaid
+flowchart TD
+    T[Task transition: BEGIN IMMEDIATE] --> Q[Save task state]
+    Q --> E[Append task_events in same transaction]
+    E --> C[Commit state and history together]
+    C --> D[Lifespan-owned EventDispatcher]
+    D --> B[EventBus: Observer subscriptions]
+    B --> M[metrics.v1: counters and receipt in one transaction]
+    B --> A[audit.v1: receipt then structured JSON log]
+    M --> K[Independent durable delivery acknowledgement]
+    A --> K
+```
+
+| Lifecycle type | Meaning |
+| --- | --- |
+| `task.created` | Newly accepted task; immediately followed by `task.ready` |
+| `task.ready` | Initial queue readiness, not a retry |
+| `task.started` | Successful lease claim; includes worker, attempts, and UTC expiry |
+| `task.completed` | Accepted success result |
+| `task.requeued` | Execution failure or lease expiry with attempts remaining |
+| `task.failed` | Permanent failure after the persisted attempt limit is exhausted |
+
+Payload fields are `security_event_id`, `source`, `command`, `worker_id`,
+`attempts`, `max_attempts`, `recovery_count`, `reason`, `error`, and
+`lease_expires_at`. `attempts` uses the existing task field name: zero initially,
+one on the first start. Reasons are `submitted`, `claimed`, `completed`,
+`execution_failed`, or `lease_expired`. Requeue/recovery events retain the previous
+worker identity even though queue state clears it. **Lifecycle payloads never
+expose lease tokens**, raw producer payloads, or worker result dictionaries.
+A started event may carry the last error from a previous attempt, like its task.
+
+All task paths append using the caller's existing SQLite connection and
+`BEGIN IMMEDIATE` transaction. An event insert failure rolls back task writes,
+including every task in a recovery batch. Identical resubmission, conflicting
+duplicates, empty claims, stale/expired/wrong-owner results, and other rejected
+transitions create no additional events. `task_events` has a unique event UUID,
+autoincrementing sequence, task index, and update/delete rejection triggers.
+HTTP handlers only commit state/history; they never invoke subscribers.
+
+### Delivery and subscribers
+
+`EventSubscriber` defines a stable `subscriber_id` and async `handle(event)`.
+`EventBus.register(subscriber, event_type)` subscribes to a type; omitting the
+type subscribes to all types. Re-registering the same object/type is harmless,
+multiple types merge, and a wildcard plus a typed match calls the object once.
+A different object with an already registered ID is rejected; unregister the old
+one explicitly before replacing it. `unregister(subscriber_id)` removes routing,
+not durable pending work. Publish uses a subscription snapshot, logs exceptions,
+returns per-subscriber outcomes, and propagates cancellation. The bus has no
+concrete subscriber imports. Central construction explicitly installs metrics
+and audit; `ServerService.event_bus` supports additional injected subscribers.
+Treat subscriber identities as immutable and stable across deployments.
+
+The dispatcher scans committed history and insert-ignores applicable
+`event_deliveries` targets in one transaction. Thus startup also discovers old
+backlog, new subscribers receive applicable history, and events appended during
+a scan are discovered on a later pass. Each `(event_id, subscriber_id)` has
+independent `delivered_at`, attempt count, and last error. Unregistered targets
+stay pending, never implicitly successful. Re-registering the same stable ID
+resumes them. Keep a stable ID's event-type subscriptions consistent so older
+pending events remain routable.
+
+Each pass handles at most **100 events per subscriber**, in sequence. A failure
+stops later events for that subscriber during the pass, but other subscribers
+continue. Only successful handlers are acknowledged, in a separate transaction.
+Database/dispatch exceptions are logged and retried on the next pass. All SQLite
+work runs off the event loop using cancellation-safe `storage_call`; shutdown
+cancels/awaits dispatcher and recovery and joins in-flight storage operations.
+Custom handlers must cooperate with cancellation and remain bounded: delivery is
+sequential, so a slow handler can delay other subscribers. There is no broker,
+parallel-consumer infrastructure, failure-control endpoint, or dashboard change.
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `EVENT_DISPATCH_INTERVAL` | `1` | Finite positive seconds after each dispatch pass, central only |
+
+Delivery is **at least once**: a process can die after handling but before
+acknowledgement, and acknowledgement errors also cause replay. Subscribers must
+make side effects idempotent. The two built-ins use stable IDs `metrics.v1` and
+`audit.v1` and SQLite `subscriber_receipts` containing only subscriber/event IDs,
+not duplicate event payloads. Metrics counters and receipts commit atomically.
+Audit writes a receipt **before** emitting an INFO JSON message with task/event
+IDs, type, sequence, UTC time, and metadata. This suppresses normal replay logs,
+but a crash/logging failure after receipt commit can lose a log line. SQLite and
+a logging sink cannot commit atomically: **audit logs are best effort, not
+exactly once; the durable event log is authoritative**.
+
+### History and metrics API
+
+| Method/path | Response |
+| --- | --- |
+| `GET /events/lifecycle` | Latest 50 lifecycle events, returned in ascending sequence order |
+| `GET /tasks/{task_id}/events` | Same bounded history for a known task; unknown task returns 404 |
+| `GET /metrics/events` | Durable, eventually consistent lifecycle projection counters |
+
+Both history endpoints accept `limit` (1–200, default 50) and optional
+`after_sequence` (integer >= 0). **Without a cursor**, the latest window is
+returned, ascending. **With a cursor**, the next window strictly after that
+sequence is returned, ascending; start at `after_sequence=0` to read from the
+beginning, and use the last returned sequence for the next page. An empty page
+means caught up at read time. Malformed IDs/cursors/limits return 422. A known
+pre-upgrade task may have empty history. Existing `POST /events`, task, stats,
+health, and watchdog routes are unchanged.
+
+```bash
+curl --fail 'http://127.0.0.1:8000/events/lifecycle?limit=50&after_sequence=0'
+curl --fail http://127.0.0.1:8000/metrics/events
+```
+
+Metrics keys are `created`, `started`, `completed`, `permanently_failed`,
+`requeued`, and `retry_attempts` (starts where `attempts > 1`). These describe
+observed lifecycle transitions, **not current task-state gauges**. `/stats`
+remains authoritative for current queue state and task-lifetime totals; event
+metrics can lag by a dispatch interval plus backlog/processing time and persist
+across restart. Do not assume a separate history request and metrics request
+share one snapshot while tasks are changing.
+
+For an explicit rebuild against the initialized central database, use the Python
+storage API. For the default local file, from the repository root:
+
+```bash
+.venv/bin/python -c 'from sentinel.storage.database import Database; from sentinel.storage.event_projections import EventProjections; print(EventProjections(Database("data/sentinel.db")).rebuild_metrics())'
+```
+
+Use the configured `DATABASE_PATH` instead if it differs. For Compose's mounted
+file, execute inside the existing main-server container:
+
+```bash
+docker compose exec -T main-server python -c 'from sentinel.storage.database import Database; from sentinel.storage.event_projections import EventProjections; print(EventProjections(Database("/app/data/sentinel.db")).rebuild_metrics())'
+```
+
+Rebuild resets only metric counters/receipts and replays all events in sequence
+inside one `BEGIN IMMEDIATE` transaction. Concurrent writers wait; WAL readers see
+the prior committed counters until commit. Subsequent handlers read fresh dedup
+receipts, preventing double counts. Delivery acknowledgements and audit receipts
+are intentionally unchanged. Rebuild is an administrative Python operation, not
+a public mutation API, and can block task writers for the duration of replay.
+
+### Upgrade, validation, and limits
+
+Startup adds tables/indexes/triggers alongside the existing Phase 6 schema,
+without replacing tasks or the `sentinel-data:/app/data` volume. Existing task
+IDs, states, outcomes, leases, and limits are preserved. **No synthetic history is
+backfilled for pre-Phase-7 transitions**. Historical tasks can therefore produce
+later start/completion events without a creation event; rebuilding cannot infer
+missing history. Metrics need not match task-lifetime totals across an upgrade.
+
+```bash
+.venv/bin/python -m unittest discover -s tests -v
+.venv/bin/python tests/smoke_events.py --base-port 19060 --timeout 60
+.venv/bin/python tests/smoke_recovery.py --base-port 18960 --timeout 60
+docker compose config --quiet
+```
+
+Unit tests use temporary SQLite files and controlled subscriber failures. They
+cover atomic rollback after task writes, concurrent dedup, independent targets,
+ordering/retries, acknowledgement failure replay, audit receipts, metrics
+rebuild/concurrent handlers/reader snapshots, API pagination, old-schema upgrade,
+and cancellation. The standard-library lifecycle smoke reuses the bounded
+six-process recovery harness: both producers/workers, all classifications,
+watchdog observations, heartbeats, worker death and lease recovery. It delays
+dispatch, confirms a persisted unprojected backlog, restarts central to catch up,
+compares event counts/counters/receipts/acknowledgements, then verifies a second
+restart is idempotent. It uses temporary data, checks ports before launch, and
+stops/awaits only its own children. The Phase 6 smoke also verifies the recovered
+task's six-event history and metadata.
+
+Run a single central process as before. Lifecycle events, deliveries, and
+receipts currently grow without bound; retention/compaction is future work, not
+implemented here. Target seeding scans the retained log each pass, so large
+histories will require a future indexed watermark/retention design. No new
+detection rules, infrastructure, authentication, or Phase 8 features are added.
+
 ## Phase 4: Docker Compose
 
 Requires Docker with a running daemon and Docker Compose v2+ (or compatible v5).
@@ -479,6 +660,12 @@ restart, producers/workers re-register and monitoring recovers automatically.
 - `server/registry.py`: lock-protected in-memory registry.
 - `storage/database.py`, `task_repository.py`: SQLite setup and transactional durable queue.
 - `reliability/recovery.py`: cancellation-safe periodic expired-lease recovery.
+- `core/events.py`, `event_bus.py`: immutable lifecycle models and Observer contracts.
+- `storage/event_repository.py`, `event_projections.py`: append-only outbox, durable
+  delivery acknowledgements, projection receipts/counters, and metric rebuild.
+- `reliability/event_dispatcher.py`: bounded ordered background delivery/retry loop.
+- `observers/metrics.py`, `audit.py`: explicitly registered built-in subscribers.
+- `server/event_routes.py`: bounded history and eventual event-metrics APIs.
 - `core/factory.py`: existing Factory Method creators; construction has no I/O.
 - `core/service.py`: `create_app()`, APIs and lifespan ownership. WatchdogService
   composes a `ServiceMonitor` while retaining the factory-created role classes.
