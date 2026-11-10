@@ -37,6 +37,22 @@ class Database:
                     error TEXT,
                     recovery_count INTEGER NOT NULL DEFAULT 0
                 );
+                CREATE TABLE IF NOT EXISTS task_events (
+                    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                    event_id TEXT NOT NULL UNIQUE,
+                    task_id TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    timestamp TEXT NOT NULL,
+                    payload TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS task_events_task
+                    ON task_events(task_id, sequence);
+                CREATE TRIGGER IF NOT EXISTS task_events_no_update
+                    BEFORE UPDATE ON task_events BEGIN
+                    SELECT RAISE(ABORT, 'task_events is append-only'); END;
+                CREATE TRIGGER IF NOT EXISTS task_events_no_delete
+                    BEFORE DELETE ON task_events BEGIN
+                    SELECT RAISE(ABORT, 'task_events is append-only'); END;
                 CREATE INDEX IF NOT EXISTS tasks_ready
                     ON tasks(status, created_at, sequence);
                 CREATE INDEX IF NOT EXISTS tasks_expiry
