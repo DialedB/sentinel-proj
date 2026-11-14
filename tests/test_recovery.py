@@ -6,7 +6,7 @@ import tempfile
 import threading
 import unittest
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, UTC
 from pathlib import Path
 from unittest.mock import Mock, patch
 from uuid import uuid4
@@ -26,28 +26,53 @@ class DurableAPITests(unittest.TestCase):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         self.path = str(Path(directory.name) / "tasks.db")
-        self.now = datetime(2026, 1, 1, tzinfo=timezone.utc)
-        self.config = ServiceConfig("s", ServiceRole.SERVER, "localhost", 8000,
-                                    "http://central", database_path=self.path,
-                                    recovery_interval_seconds=.01)
+        self.now = datetime(2026, 1, 1, tzinfo=UTC)
+        self.config = ServiceConfig(
+            "s",
+            ServiceRole.SERVER,
+            "localhost",
+            8000,
+            "http://central",
+            database_path=self.path,
+            recovery_interval_seconds=0.01,
+        )
 
     def service(self):
-        return ServerService(self.config, TaskRepository(
-            self.path, clock=lambda: self.now, lease_seconds=10,
-        ))
+        return ServerService(
+            self.config,
+            TaskRepository(
+                self.path,
+                clock=lambda: self.now,
+                lease_seconds=10,
+            ),
+        )
 
     def register(self, client):
-        self.assertEqual(client.post("/register", json=dict(
-            service_id="w", role="worker", host="localhost", port=8002,
-        )).status_code, 200)
+        self.assertEqual(
+            client.post(
+                "/register",
+                json=dict(
+                    service_id="w",
+                    role="worker",
+                    host="localhost",
+                    port=8002,
+                ),
+            ).status_code,
+            200,
+        )
 
     def submit(self, client):
         event = SecurityEvent(source="p", event_type="login_success", payload={})
         return client.post("/events", json=event.model_dump(mode="json")).json()
 
     def result(self, task):
-        return dict(worker_id="w", lease_token=task["lease_token"],
-                    outcome=dict(status="success", result={"event_id": task["event"]["event_id"]}))
+        return dict(
+            worker_id="w",
+            lease_token=task["lease_token"],
+            outcome=dict(
+                status="success", result={"event_id": task["event"]["event_id"]}
+            ),
+        )
 
     def test_recreation_preserves_ids_outcomes_dedup_and_recovers_expired_running(self):
         service = self.service()
@@ -56,7 +81,9 @@ class DurableAPITests(unittest.TestCase):
             self.register(client)
             complete = self.submit(client)
             running = client.get("/tasks/next?worker_id=w").json()
-            completed = client.post(f'/tasks/{running["task_id"]}/result', json=self.result(running)).json()
+            completed = client.post(
+                f"/tasks/{running['task_id']}/result", json=self.result(running)
+            ).json()
             self.submit(client)
             running = client.get("/tasks/next?worker_id=w").json()
             ready = self.submit(client)
@@ -64,17 +91,23 @@ class DurableAPITests(unittest.TestCase):
         with TestClient(self.service().create_app()) as client:
             self.assertEqual(client.get("/services").json(), [])
             self.register(client)
-            self.assertEqual(client.get(f'/tasks/{complete["task_id"]}').json(), completed)
-            self.assertEqual(client.post("/events", json=completed["event"]).json(), completed)
-            recovered = client.get(f'/tasks/{running["task_id"]}').json()
+            self.assertEqual(
+                client.get(f"/tasks/{complete['task_id']}").json(), completed
+            )
+            self.assertEqual(
+                client.post("/events", json=completed["event"]).json(), completed
+            )
+            recovered = client.get(f"/tasks/{running['task_id']}").json()
             self.assertEqual(recovered["state"], "READY")
             self.assertEqual(recovered["recovery_count"], 1)
-            self.assertEqual(client.get(f'/tasks/{ready["task_id"]}').json()["state"], "READY")
+            self.assertEqual(
+                client.get(f"/tasks/{ready['task_id']}").json()["state"], "READY"
+            )
             newer = client.get("/tasks/next?worker_id=w").json()
             self.assertEqual(newer["task_id"], running["task_id"])
             self.assertEqual(newer["attempts"], 2)
             self.assertNotEqual(newer["lease_token"], running["lease_token"])
-            path = f'/tasks/{newer["task_id"]}/result'
+            path = f"/tasks/{newer['task_id']}/result"
             baseline = client.get("/stats").json()
             for token in (running["lease_token"], str(uuid4())):
                 body = {**self.result(newer), "lease_token": token}
@@ -83,7 +116,9 @@ class DurableAPITests(unittest.TestCase):
             missing = self.result(newer)
             del missing["lease_token"]
             self.assertEqual(client.post(path, json=missing).status_code, 422)
-            self.assertEqual(client.post(path, json=self.result(newer)).json()["state"], "COMPLETED")
+            self.assertEqual(
+                client.post(path, json=self.result(newer)).json()["state"], "COMPLETED"
+            )
         with TestClient(self.service().create_app()) as client:
             self.assertEqual(client.get("/stats").json()["completed"], 2)
             self.assertEqual(client.get("/stats").json()["recovery_count"], 1)
@@ -98,22 +133,47 @@ class DurableAPITests(unittest.TestCase):
             self.now += timedelta(seconds=10)
             before = client.get("/stats").json()
             self.assertEqual(before["expired_active"], 1)
-            response = client.post(f'/tasks/{running["task_id"]}/result', json=self.result(running))
+            response = client.post(
+                f"/tasks/{running['task_id']}/result", json=self.result(running)
+            )
             self.assertEqual(response.status_code, 409)
             self.assertEqual(client.get("/stats").json(), before)
-            self.assertEqual(client.get(f'/tasks/{running["task_id"]}').json(), running)
+            public_running = {
+                key: value for key, value in running.items() if key != "lease_token"
+            }
+            self.assertEqual(
+                client.get(f"/tasks/{running['task_id']}").json(), public_running
+            )
 
     def test_config_defaults_and_strict_validation(self):
         config = ServiceConfig.from_env(ServiceRole.SERVER, {})
-        self.assertEqual((config.database_path, config.task_lease_seconds,
-                          config.task_max_attempts, config.recovery_interval_seconds),
-                         ("data/sentinel.db", 30, 3, 5))
-        loaded = ServiceConfig.from_env(ServiceRole.SERVER, dict(
-            DATABASE_PATH=self.path, TASK_LEASE_SECONDS="6", TASK_MAX_ATTEMPTS="2",
-            RECOVERY_INTERVAL_SECONDS="1"))
-        self.assertEqual((loaded.database_path, loaded.task_lease_seconds,
-                          loaded.task_max_attempts, loaded.recovery_interval_seconds),
-                         (self.path, 6, 2, 1))
+        self.assertEqual(
+            (
+                config.database_path,
+                config.task_lease_seconds,
+                config.task_max_attempts,
+                config.recovery_interval_seconds,
+            ),
+            ("data/sentinel.db", 30, 3, 5),
+        )
+        loaded = ServiceConfig.from_env(
+            ServiceRole.SERVER,
+            dict(
+                DATABASE_PATH=self.path,
+                TASK_LEASE_SECONDS="6",
+                TASK_MAX_ATTEMPTS="2",
+                RECOVERY_INTERVAL_SECONDS="1",
+            ),
+        )
+        self.assertEqual(
+            (
+                loaded.database_path,
+                loaded.task_lease_seconds,
+                loaded.task_max_attempts,
+                loaded.recovery_interval_seconds,
+            ),
+            (self.path, 6, 2, 1),
+        )
         for name in ("task_lease_seconds", "recovery_interval_seconds"):
             for value in (0, -1, True, "1", float("nan"), float("inf")):
                 with self.assertRaises(ValueError):
@@ -132,34 +192,51 @@ class DurableAPITests(unittest.TestCase):
 class RecoveryLoopTests(unittest.IsolatedAsyncioTestCase):
     async def test_periodic_recovery_and_cancellation_no_leaked_loop(self):
         with tempfile.TemporaryDirectory() as directory:
-            now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+            now = datetime(2026, 1, 1, tzinfo=UTC)
             repo = TaskRepository(str(Path(directory) / "tasks.db"), clock=lambda: now)
-            service = ServerService(ServiceConfig(
-                "s", ServiceRole.SERVER, "localhost", 8000, "http://central",
-                recovery_interval_seconds=.005,
-            ), repo)
+            service = ServerService(
+                ServiceConfig(
+                    "s",
+                    ServiceRole.SERVER,
+                    "localhost",
+                    8000,
+                    "http://central",
+                    recovery_interval_seconds=0.005,
+                ),
+                repo,
+            )
             app = service.create_app()
             async with app.router.lifespan_context(app):
-                repo.submit(SecurityEvent(source="p", event_type="login_success", payload={}))
+                repo.submit(
+                    SecurityEvent(source="p", event_type="login_success", payload={})
+                )
                 running = repo.claim("w")
                 now += timedelta(seconds=31)
                 for _ in range(100):
                     if repo.get(running.task_id).recovery_count:
                         break
-                    await asyncio.sleep(.005)
+                    await asyncio.sleep(0.005)
                 self.assertEqual(repo.get(running.task_id).recovery_count, 1)
-            self.assertFalse(any(t.get_name() == "recovery-s" for t in asyncio.all_tasks()))
+            self.assertFalse(
+                any(t.get_name() == "recovery-s" for t in asyncio.all_tasks())
+            )
 
     async def test_storage_cancellation_joins_inflight_thread(self):
-        entered, release, finished = threading.Event(), threading.Event(), threading.Event()
+        entered, release, finished = (
+            threading.Event(),
+            threading.Event(),
+            threading.Event(),
+        )
+
         def operation():
             entered.set()
             release.wait(2)
             finished.set()
+
         runner = asyncio.create_task(storage_call(operation))
         await asyncio.to_thread(entered.wait, 1)
         runner.cancel()
-        await asyncio.sleep(.01)
+        await asyncio.sleep(0.01)
         self.assertFalse(runner.done())
         release.set()
         with self.assertRaises(asyncio.CancelledError):
@@ -170,14 +247,16 @@ class RecoveryLoopTests(unittest.IsolatedAsyncioTestCase):
         repo = Mock()
         called = asyncio.Event()
         count = 0
+
         async def recover(repository):
             nonlocal count
             count += 1
             if count == 1:
                 raise sqlite3.OperationalError("busy")
             called.set()
+
         with patch("sentinel.reliability.recovery.recover_once", recover):
-            runner = asyncio.create_task(run_recovery(repo, .001))
+            runner = asyncio.create_task(run_recovery(repo, 0.001))
             try:
                 with self.assertLogs("sentinel.reliability.recovery", level="ERROR"):
                     await asyncio.wait_for(called.wait(), 1)

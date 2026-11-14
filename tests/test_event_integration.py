@@ -5,6 +5,7 @@ import sqlite3
 import tempfile
 import threading
 import unittest
+from contextlib import closing
 from datetime import timedelta
 from pathlib import Path
 from unittest.mock import patch
@@ -32,33 +33,48 @@ class TransactionIntegrationTests(unittest.TestCase):
         tasks = [self.repo.submit(self.event()) for _ in range(2)]
         running = [self.repo.claim("w") for _ in tasks]
         before = self.repo.snapshot(), events.list_events(after_sequence=0)
-        with patch("sentinel.storage.task_repository.insert_event", side_effect=sqlite3.OperationalError("disk")):
+        with patch(
+            "sentinel.storage.task_repository.insert_event",
+            side_effect=sqlite3.OperationalError("disk"),
+        ):
             with self.assertRaises(sqlite3.OperationalError):
                 self.repo.finish(running[0].task_id, self.result(running[0]))
-        self.assertEqual((self.repo.snapshot(), events.list_events(after_sequence=0)), before)
+        self.assertEqual(
+            (self.repo.snapshot(), events.list_events(after_sequence=0)), before
+        )
         self.now += timedelta(seconds=11)
         from sentinel.storage.event_repository import insert_event
+
         calls = 0
+
         def fail_second(connection, event):
             nonlocal calls
             calls += 1
             if calls == 2:
                 raise sqlite3.OperationalError("disk")
             return insert_event(connection, event)
+
         with patch("sentinel.storage.task_repository.insert_event", fail_second):
             with self.assertRaises(sqlite3.OperationalError):
                 self.repo.recover_expired()
-        self.assertEqual((self.repo.snapshot(), events.list_events(after_sequence=0)), before)
+        self.assertEqual(
+            (self.repo.snapshot(), events.list_events(after_sequence=0)), before
+        )
 
     def test_upgrade_existing_task_table_without_synthetic_history(self):
         original = self.repo.submit(self.event())
         with self.repo.database.connection() as connection:
-            schema = connection.execute("SELECT sql FROM sqlite_master WHERE name='tasks'").fetchone()[0]
+            schema = connection.execute(
+                "SELECT sql FROM sqlite_master WHERE name='tasks'"
+            ).fetchone()[0]
             row = connection.execute("SELECT * FROM tasks").fetchone()
         legacy_path = str(Path(self.directory.name) / "legacy.db")
-        with sqlite3.connect(legacy_path) as connection:
+        with closing(sqlite3.connect(legacy_path)) as connection, connection:
             connection.execute(schema)
-            connection.execute("INSERT INTO tasks VALUES (" + ",".join("?" for _ in row) + ")", tuple(row))
+            connection.execute(
+                "INSERT INTO tasks VALUES (" + ",".join("?" for _ in row) + ")",
+                tuple(row),
+            )
         upgraded = TaskRepository(legacy_path, clock=lambda: self.now)
         upgraded.initialize()
         upgraded.initialize()
@@ -66,26 +82,39 @@ class TransactionIntegrationTests(unittest.TestCase):
         history = EventRepository(upgraded.database)
         self.assertEqual(history.list_events(), [])
         upgraded.claim("w")
-        self.assertEqual([e.event_type.value for e in history.list_events()], ["task.started"])
+        self.assertEqual(
+            [e.event_type.value for e in history.list_events()], ["task.started"]
+        )
 
-    def test_rebuild_readers_see_committed_snapshot_and_handler_reads_fresh_receipts(self):
+    def test_rebuild_readers_see_committed_snapshot_and_handler_reads_fresh_receipts(
+        self,
+    ):
         first = self.repo.submit(self.event())
         projections = EventProjections(self.repo.database)
         baseline = projections.rebuild_metrics()
         second = self.repo.submit(self.event())
         self.assertNotEqual(first.task_id, second.task_id)
-        fresh = EventRepository(self.repo.database).list_events(task_id=second.task_id)[0]
-        entered, release, handler_entered = threading.Event(), threading.Event(), threading.Event()
+        fresh = EventRepository(self.repo.database).list_events(task_id=second.task_id)[
+            0
+        ]
+        entered, release, handler_entered = (
+            threading.Event(),
+            threading.Event(),
+            threading.Event(),
+        )
         original = projections._apply_metrics
+
         def pause_rebuild(connection, event):
             if not entered.is_set():
                 entered.set()
                 if not release.wait(2):
                     raise TimeoutError("test did not release rebuild")
             original(connection, event)
+
         def handler():
             handler_entered.set()
             projections.apply_metrics(fresh)
+
         with patch.object(projections, "_apply_metrics", pause_rebuild):
             with ThreadPoolExecutor(max_workers=2) as pool:
                 rebuild = pool.submit(projections.rebuild_metrics)
@@ -121,7 +150,10 @@ class DeliveryIntegrationTests(unittest.IsolatedAsyncioTestCase):
             repo = TaskRepository(str(Path(directory) / "events.db"))
             repo.initialize()
             from sentinel.common.tasks import SecurityEvent
-            repo.submit(SecurityEvent(source="p", event_type="login_success", payload={}))
+
+            repo.submit(
+                SecurityEvent(source="p", event_type="login_success", payload={})
+            )
             events = EventRepository(repo.database)
             projections = EventProjections(repo.database)
             bus = EventBus()
@@ -136,7 +168,11 @@ class DeliveryIntegrationTests(unittest.IsolatedAsyncioTestCase):
             restarted.register(MetricsSubscriber(projections))
             restarted.register(AuditSubscriber(projections))
             dispatcher = EventDispatcher(events, restarted)
-            with patch.object(events, "record_delivery", side_effect=sqlite3.OperationalError("ack lost")):
+            with patch.object(
+                events,
+                "record_delivery",
+                side_effect=sqlite3.OperationalError("ack lost"),
+            ):
                 with self.assertRaises(sqlite3.OperationalError):
                     await dispatcher.dispatch_once()
             self.assertEqual(projections.metrics_snapshot()["created"], 1)
@@ -149,23 +185,31 @@ class DeliveryIntegrationTests(unittest.IsolatedAsyncioTestCase):
             repo = TaskRepository(str(Path(directory) / "events.db"))
             repo.initialize()
             from sentinel.common.tasks import SecurityEvent
-            repo.submit(SecurityEvent(source="p", event_type="login_success", payload={}))
+
+            repo.submit(
+                SecurityEvent(source="p", event_type="login_success", payload={})
+            )
             events = EventRepository(repo.database)
             bus = EventBus()
             bus.register(RecordingSubscriber())
             entered, release = threading.Event(), threading.Event()
             original = events.record_delivery
+
             def delayed(*args, **kwargs):
                 entered.set()
                 release.wait(2)
                 original(*args, **kwargs)
+
             with patch.object(events, "record_delivery", delayed):
                 task = asyncio.create_task(EventDispatcher(events, bus).dispatch_once())
                 self.assertTrue(await asyncio.to_thread(entered.wait, 1))
                 task.cancel()
-                await asyncio.sleep(.005)
+                await asyncio.sleep(0.005)
                 self.assertFalse(task.done())
                 release.set()
                 with self.assertRaises(asyncio.CancelledError):
                     await task
-            self.assertEqual([e.event_type.value for e in events.pending("recording")], ["task.ready"])
+            self.assertEqual(
+                [e.event_type.value for e in events.pending("recording")],
+                ["task.ready"],
+            )

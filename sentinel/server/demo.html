@@ -130,7 +130,7 @@
       await Promise.allSettled([
         update('services', '/demo/status', services),
         update('stats', '/stats', stats),
-        update('tasks', '/tasks', tasks)
+        update('tasks', '/tasks?limit=10&latest=true', tasks)
       ]);
       setTimeout(refresh, 3000);
     }

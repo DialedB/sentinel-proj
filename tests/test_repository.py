@@ -3,7 +3,7 @@
 import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, UTC
 from pathlib import Path
 from uuid import uuid4
 
@@ -16,7 +16,7 @@ class RepositoryTests(unittest.TestCase):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.path = str(Path(self.directory.name) / "nested" / "tasks.db")
-        self.now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        self.now = datetime(2026, 1, 1, tzinfo=UTC)
         self.repo = self.reopen()
 
     def reopen(self):
@@ -29,9 +29,15 @@ class RepositoryTests(unittest.TestCase):
         return SecurityEvent(source="p", event_type="login_failed", payload={"n": 1})
 
     def result(self, task, *, failure=False, **changes):
-        values = dict(worker_id=task.worker_id, lease_token=task.lease_token,
-                      outcome=Failure(status="failure", error="execution failed") if failure
-                      else Success(status="success", result={"event_id": str(task.event.event_id)}))
+        values = dict(
+            worker_id=task.worker_id,
+            lease_token=task.lease_token,
+            outcome=Failure(status="failure", error="execution failed")
+            if failure
+            else Success(
+                status="success", result={"event_id": str(task.event.event_id)}
+            ),
+        )
         values.update(changes)
         return TaskResult(**values)
 
@@ -60,14 +66,21 @@ class RepositoryTests(unittest.TestCase):
         other = self.reopen()
         e = self.event()
         with ThreadPoolExecutor(max_workers=12) as pool:
-            ids = list(pool.map(lambda i: (self.repo if i % 2 else other).submit(e).task_id,
-                                range(40)))
+            ids = list(
+                pool.map(
+                    lambda i: (self.repo if i % 2 else other).submit(e).task_id,
+                    range(40),
+                )
+            )
         self.assertEqual(len(set(ids)), 1)
         for _ in range(29):
             self.repo.submit(self.event())
         with ThreadPoolExecutor(max_workers=12) as pool:
-            claims = list(pool.map(lambda i: (self.repo if i % 2 else other).claim(str(i)),
-                                   range(60)))
+            claims = list(
+                pool.map(
+                    lambda i: (self.repo if i % 2 else other).claim(str(i)), range(60)
+                )
+            )
         claims = [t for t in claims if t]
         self.assertEqual(len(claims), 30)
         self.assertEqual(len({t.task_id for t in claims}), 30)
@@ -104,13 +117,17 @@ class RepositoryTests(unittest.TestCase):
         self.assertEqual(self.repo.stats()["recovery_count"], 1)
         self.assertEqual(self.repo.stats()["retry_attempts"], 1)
 
-    def test_execution_failures_requeue_until_persisted_limit_and_terminal_immutable(self):
+    def test_execution_failures_requeue_until_persisted_limit_and_terminal_immutable(
+        self,
+    ):
         self.repo.submit(self.event())
         for attempt in range(1, 4):
             task = self.repo.claim("w")
             self.assertEqual(task.attempts, attempt)
             finished = self.repo.finish(task.task_id, self.result(task, failure=True))
-            self.assertEqual(finished.state, TaskState.READY if attempt < 3 else TaskState.FAILED)
+            self.assertEqual(
+                finished.state, TaskState.READY if attempt < 3 else TaskState.FAILED
+            )
             self.assertEqual(finished.error, "execution failed")
             self.repo = self.reopen()
         self.assertIsNone(self.repo.claim("w"))
@@ -170,8 +187,10 @@ class RepositoryTests(unittest.TestCase):
         new = changed.submit(self.event())
         self.assertEqual(new.max_attempts, 1)
         running = changed.claim("w")
-        self.assertEqual(changed.finish(new.task_id, self.result(running, failure=True)).state,
-                         TaskState.FAILED)
+        self.assertEqual(
+            changed.finish(new.task_id, self.result(running, failure=True)).state,
+            TaskState.FAILED,
+        )
 
     def test_concurrent_recovery_once_and_fifo_when_creation_times_tie(self):
         tasks = [self.repo.submit(self.event()) for _ in range(5)]
@@ -180,26 +199,41 @@ class RepositoryTests(unittest.TestCase):
         self.now += timedelta(seconds=11)
         other = self.reopen()
         with ThreadPoolExecutor(max_workers=2) as pool:
-            counts = list(pool.map(lambda repo: repo.recover_expired(), [self.repo, other]))
+            counts = list(
+                pool.map(lambda repo: repo.recover_expired(), [self.repo, other])
+            )
         self.assertEqual(sum(counts), 5)
         self.assertEqual(self.repo.stats()["recovery_count"], 5)
         self.assertTrue(all(t.recovery_count == 1 for t in self.repo.snapshot()))
-        self.assertEqual([self.repo.claim("w").task_id for _ in tasks],
-                         [t.task_id for t in tasks])
+        self.assertEqual(
+            [self.repo.claim("w").task_id for _ in tasks], [t.task_id for t in tasks]
+        )
 
     def test_conflicting_other_event_fields_and_rejected_success_rollback(self):
         e = self.event()
         original = self.repo.submit(e)
-        for changes in ({"source": "other"}, {"event_type": "access_denied"},
-                        {"timestamp": e.timestamp + timedelta(seconds=1)}):
+        for changes in (
+            {"source": "other"},
+            {"event_type": "access_denied"},
+            {"timestamp": e.timestamp + timedelta(seconds=1)},
+        ):
             with self.assertRaises(ValueError):
-                self.repo.submit(SecurityEvent.model_validate({**e.model_dump(), **changes}))
+                self.repo.submit(
+                    SecurityEvent.model_validate({**e.model_dump(), **changes})
+                )
             self.assertEqual(self.repo.get(original.task_id), original)
         running = self.repo.claim("w")
         before = self.repo.stats()
         with self.assertRaises(ValueError):
-            self.repo.finish(running.task_id, self.result(
-                running, outcome=Success(status="success", result={"event_id": str(uuid4())})))
+            self.repo.finish(
+                running.task_id,
+                self.result(
+                    running,
+                    outcome=Success(
+                        status="success", result={"event_id": str(uuid4())}
+                    ),
+                ),
+            )
         self.assertEqual(self.repo.get(running.task_id), running)
         self.assertEqual(self.repo.stats(), before)
         snapshot = self.repo.snapshot()

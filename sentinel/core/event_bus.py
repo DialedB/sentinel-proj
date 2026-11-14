@@ -41,7 +41,9 @@ class EventBus:
         self._subscriptions: dict[str, Subscription] = {}
 
     def register(
-        self, subscriber: EventSubscriber, event_type: TaskEventType | None = None,
+        self,
+        subscriber: EventSubscriber,
+        event_type: TaskEventType | None = None,
     ) -> None:
         identity = subscriber.subscriber_id
         if not isinstance(identity, str) or not identity.strip():
@@ -61,7 +63,10 @@ class EventBus:
         return tuple(self._subscriptions.values())
 
     async def publish(
-        self, event: TaskLifecycleEvent, *, subscriber_ids: Iterable[str] | None = None,
+        self,
+        event: TaskLifecycleEvent,
+        *,
+        subscriber_ids: Iterable[str] | None = None,
     ) -> dict[str, DeliveryOutcome]:
         targets = set(subscriber_ids) if subscriber_ids is not None else None
         outcomes = {}
@@ -75,9 +80,14 @@ class EventBus:
             try:
                 await subscriber.handle(event)
             except Exception as error:
-                logger.exception("Lifecycle subscriber failed subscriber_id=%s event_id=%s",
-                                 identity, event.event_id)
-                outcomes[identity] = DeliveryOutcome(False, f"{type(error).__name__}: {error}")
+                logger.exception(
+                    "Lifecycle subscriber failed subscriber_id=%s event_id=%s",
+                    identity,
+                    event.event_id,
+                )
+                outcomes[identity] = DeliveryOutcome(
+                    False, f"{type(error).__name__}: {error}"
+                )
             else:
                 outcomes[identity] = DeliveryOutcome(True)
         return outcomes

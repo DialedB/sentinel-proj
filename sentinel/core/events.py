@@ -1,6 +1,6 @@
 """Immutable lifecycle contracts, distinct from producer security events."""
 
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 from enum import Enum
 from uuid import UUID, uuid4
 
@@ -40,7 +40,7 @@ class LifecycleMetadata(BaseModel):
 def aware_utc(value: datetime) -> datetime:
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError("timestamp must be timezone aware")
-    return value.astimezone(timezone.utc)
+    return value.astimezone(UTC)
 
 
 class TaskLifecycleEvent(BaseModel):

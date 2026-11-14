@@ -1,9 +1,10 @@
 """Synthetic data only: fictional users and RFC 5737 documentation addresses."""
 
 from itertools import cycle
-from typing import Iterator
+from collections.abc import Iterator
 
 from sentinel.common.tasks import EventType, SecurityEvent
+from sentinel.producer.builder import SecurityEventBuilder
 
 
 class SecurityEventGenerator:
@@ -12,8 +13,10 @@ class SecurityEventGenerator:
         self.types: Iterator[EventType] = cycle(EventType)
 
     def generate(self) -> SecurityEvent:
-        return SecurityEvent(
-            source=self.source,
-            event_type=next(self.types),
-            payload={"user": "fictional-alex", "source_ip": "192.0.2.10"},
+        return (
+            SecurityEventBuilder()
+            .from_source(self.source)
+            .of_type(next(self.types))
+            .with_payload({"user": "fictional-alex", "source_ip": "192.0.2.10"})
+            .build()
         )

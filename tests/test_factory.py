@@ -49,8 +49,9 @@ class FactoryTests(unittest.TestCase):
                 self.assertIs(service.status, ServiceStatus.STARTING)
                 self.assertEqual(
                     service.get_info(),
-                    ServiceInfo("service-1", role, ServiceStatus.STARTING,
-                                "localhost", 8000),
+                    ServiceInfo(
+                        "service-1", role, ServiceStatus.STARTING, "localhost", 8000
+                    ),
                 )
 
     def test_identity_properties_are_read_only(self) -> None:
@@ -89,9 +90,18 @@ class FactoryTests(unittest.TestCase):
             "host": ("", " \t", None, 123),
             "port": (0, -1, 65536, True, False, 8000.0, "8000", None),
             "server_url": (
-                "", " ", None, 123, "localhost:8000", "ftp://localhost",
-                "http://", "https://host:bad", "http://host:65536",
-                "http://host:0", "http://[", "http://bad host",
+                "",
+                " ",
+                None,
+                123,
+                "localhost:8000",
+                "ftp://localhost",
+                "http://",
+                "https://host:bad",
+                "http://host:65536",
+                "http://host:0",
+                "http://[",
+                "http://bad host",
             ),
         }
         for field, values in invalid_values.items():
@@ -102,8 +112,11 @@ class FactoryTests(unittest.TestCase):
 
     def test_valid_configuration_boundaries(self) -> None:
         for port in (1, 65535):
-            for url in ("http://localhost", "https://example.org:443",
-                        "http://[::1]:8000"):
+            for url in (
+                "http://localhost",
+                "https://example.org:443",
+                "http://[::1]:8000",
+            ):
                 with self.subTest(port=port, url=url):
                     config = replace(self.config, port=port, server_url=url)
                     self.assertEqual(config.port, port)

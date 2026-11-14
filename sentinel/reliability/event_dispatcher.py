@@ -16,7 +16,9 @@ class EventDispatcher:
 
     async def dispatch_once(self) -> None:
         subscriptions = self.bus.snapshot()
-        targets = {entry.subscriber.subscriber_id: entry.event_types for entry in subscriptions}
+        targets = {
+            entry.subscriber.subscriber_id: entry.event_types for entry in subscriptions
+        }
         await storage_call(lambda: self.repository.seed_deliveries(targets))
         for identity in targets:
             events = await storage_call(lambda: self.repository.pending(identity))
@@ -26,9 +28,14 @@ class EventDispatcher:
                 if outcome is None:
                     # Unregistration never acknowledges outstanding work.
                     break
-                await storage_call(lambda: self.repository.record_delivery(
-                    event.event_id, identity, success=outcome.success, error=outcome.error,
-                ))
+                await storage_call(
+                    lambda: self.repository.record_delivery(
+                        event.event_id,
+                        identity,
+                        success=outcome.success,
+                        error=outcome.error,
+                    )
+                )
                 if not outcome.success:
                     # Retain strict sequence order for this subscriber only.
                     break

@@ -12,6 +12,7 @@ from uuid import UUID
 import httpx
 
 from sentinel.common.config import ServiceConfig
+from sentinel.common.errors import DomainError
 from sentinel.common.http_client import ServiceHTTPClient
 from sentinel.common.models import ServiceRole
 from sentinel.common.tasks import Failure, SecurityEvent, Task, TaskResult
@@ -127,11 +128,8 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
                 return None
 
             client.claim_task.side_effect = claim
-            request = httpx.Request("POST", "http://central/result")
-            client.submit_result.side_effect = httpx.HTTPStatusError(
-                "terminal",
-                request=request,
-                response=httpx.Response(status, request=request),
+            client.submit_result.side_effect = DomainError(
+                "conflict", "terminal", "Refresh task state.", status
             )
             runner = asyncio.create_task(work(config(), client))
             try:
@@ -167,7 +165,9 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
                 await client.submit_result(
                     t.task_id,
                     TaskResult(
-                        worker_id="w", lease_token=t.lease_token, outcome=Failure(status="failure", error="bad")
+                        worker_id="w",
+                        lease_token=t.lease_token,
+                        outcome=Failure(status="failure", error="bad"),
                     ),
                 )
         self.assertTrue(transport.is_closed)

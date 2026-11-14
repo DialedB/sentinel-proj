@@ -4,16 +4,20 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from sentinel.common.address import validate_host
+from sentinel.common.limits import MAX_SOURCE_LENGTH
 from sentinel.common.models import ServiceRole, ServiceStatus
 
 
 class Registration(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    service_id: str = Field(min_length=1)
+    service_id: str = Field(min_length=1, max_length=MAX_SOURCE_LENGTH)
     role: ServiceRole
     host: str = Field(min_length=1)
     port: int = Field(strict=True, ge=1, le=65535)
+
+    _host = field_validator("host")(validate_host)
 
     @field_validator("role")
     @classmethod
@@ -32,7 +36,7 @@ class Registration(BaseModel):
 
 class Heartbeat(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    service_id: str = Field(min_length=1)
+    service_id: str = Field(min_length=1, max_length=MAX_SOURCE_LENGTH)
 
     @field_validator("service_id")
     @classmethod

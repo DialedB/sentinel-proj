@@ -1,15 +1,19 @@
 """Validated event transport and explicit task state machine."""
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, UTC
 from enum import Enum
 from typing import Annotated, Any, Literal
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from sentinel.common.json_payload import validate_payload
+from sentinel.common.limits import MAX_SOURCE_LENGTH
+from sentinel.common.task_states import handler_for
+
 
 def utcnow() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 class EventType(str, Enum):
@@ -21,10 +25,12 @@ class EventType(str, Enum):
 class SecurityEvent(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     event_id: UUID = Field(default_factory=uuid4)
-    source: str = Field(min_length=1, pattern=r"\S")
+    source: str = Field(min_length=1, max_length=MAX_SOURCE_LENGTH, pattern=r"\S")
     event_type: EventType
     timestamp: datetime = Field(default_factory=utcnow)
     payload: dict[str, Any]
+
+    _payload_json = field_validator("payload", mode="before")(validate_payload)
 
     @field_validator("timestamp", mode="before")
     @classmethod
@@ -38,13 +44,18 @@ class SecurityEvent(BaseModel):
     def aware_utc(cls, value: datetime) -> datetime:
         if value.tzinfo is None or value.utcoffset() is None:
             raise ValueError("timestamp must be timezone aware")
-        return value.astimezone(timezone.utc)
+        try:
+            return value.astimezone(UTC)
+        except (OverflowError, ValueError) as error:
+            raise ValueError("timestamp is outside the UTC datetime range") from error
 
 
 class Success(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     status: Literal["success"]
     result: dict[str, Any]
+
+    _result_json = field_validator("result", mode="before")(validate_payload)
 
 
 class Failure(BaseModel):
@@ -94,7 +105,7 @@ class Task(BaseModel):
         target: TaskState,
         now: datetime | None = None,
         **changes: object,
-    ) -> "Task":
+    ) -> Task:
         if self.state != expected:
             raise ValueError(
                 f"Cannot transition {self.state.value} to {target.value}; "
@@ -104,61 +115,19 @@ class Task(BaseModel):
             deep=True, update=dict(state=target, updated_at=now or utcnow(), **changes)
         )
 
-    def ready(self, now: datetime | None = None) -> "Task":
-        return self._transition(TaskState.PENDING, TaskState.READY, now=now)
+    def ready(self, now: datetime | None = None) -> Task:
+        return handler_for(self).ready(self, now or utcnow())
 
     def claim(
-        self, worker_id: str, lease_seconds: float = 30,
+        self,
+        worker_id: str,
+        lease_seconds: float = 30,
         now: datetime | None = None,
-    ) -> "Task":
-        if not isinstance(worker_id, str) or not worker_id.strip():
-            raise ValueError("worker_id must not be blank")
-        now = now or utcnow()
-        if self.attempts >= self.max_attempts:
-            raise ValueError("Task attempts exhausted")
-        return self._transition(
-            TaskState.READY, TaskState.RUNNING, now=now, worker_id=worker_id,
-            attempts=self.attempts + 1, lease_token=uuid4(),
-            lease_expires_at=now + timedelta(seconds=lease_seconds),
-        )
+    ) -> Task:
+        return handler_for(self).claim(self, worker_id, lease_seconds, now or utcnow())
 
-    def finish(self, result: TaskResult, now: datetime | None = None) -> "Task":
-        now = now or utcnow()
-        if (self.state != TaskState.RUNNING
-                or self.worker_id != result.worker_id
-                or self.lease_token != result.lease_token
-                or self.lease_expires_at is None or now >= self.lease_expires_at):
-            raise ValueError("Result does not own a current active lease")
-        if (
-            isinstance(result.outcome, Success)
-            and self.command == "analyze_security_event"
-            and result.outcome.result.get("event_id") != str(self.event.event_id)
-        ):
-            raise ValueError("Result event_id does not match task event")
-        target = (
-            TaskState.COMPLETED
-            if isinstance(result.outcome, Success)
-            else (TaskState.READY if self.attempts < self.max_attempts else TaskState.FAILED)
-        )
-        changes: dict[str, Any] = dict(
-            outcome=result.outcome.model_copy(deep=True),
-            error=result.outcome.error if isinstance(result.outcome, Failure) else None,
-            lease_token=None, lease_expires_at=None,
-        )
-        if target == TaskState.READY:
-            changes["worker_id"] = None
-        return self._transition(TaskState.RUNNING, target, now=now, **changes)
+    def finish(self, result: TaskResult, now: datetime | None = None) -> Task:
+        return handler_for(self).finish(self, result, now or utcnow())
 
-    def recover_expired(self, now: datetime | None = None) -> "Task":
-        now = now or utcnow()
-        if (self.state != TaskState.RUNNING or self.lease_expires_at is None
-                or self.lease_expires_at > now):
-            raise ValueError("Only an expired RUNNING task may be recovered")
-        target = TaskState.READY if self.attempts < self.max_attempts else TaskState.FAILED
-        failure = Failure(status="failure", error="Task lease expired")
-        return self._transition(
-            TaskState.RUNNING, target, now=now, worker_id=None,
-            lease_token=None, lease_expires_at=None,
-            recovery_count=self.recovery_count + 1,
-            error=failure.error, outcome=failure,
-        )
+    def recover_expired(self, now: datetime | None = None) -> Task:
+        return handler_for(self).recover(self, now or utcnow())

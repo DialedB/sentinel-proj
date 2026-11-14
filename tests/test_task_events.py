@@ -15,8 +15,11 @@ class TaskEventTests(unittest.TestCase):
     reopen = test_repository.RepositoryTests.reopen
     event = test_repository.RepositoryTests.event
     result = test_repository.RepositoryTests.result
+
     def history(self):
-        return EventRepository(self.repo.database).list_events(after_sequence=0, limit=200)
+        return EventRepository(self.repo.database).list_events(
+            after_sequence=0, limit=200
+        )
 
     def test_complete_history_and_duplicate_rejection(self):
         security = self.event()
@@ -27,8 +30,10 @@ class TaskEventTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.repo.finish(task.task_id, self.result(running))
         events = self.history()
-        self.assertEqual([e.event_type.value for e in events],
-                         ["task.created", "task.ready", "task.started", "task.completed"])
+        self.assertEqual(
+            [e.event_type.value for e in events],
+            ["task.created", "task.ready", "task.started", "task.completed"],
+        )
         self.assertEqual(events[2].payload.worker_id, "worker")
         self.assertEqual(events[2].payload.attempts, 1)
         self.assertIsNotNone(events[2].payload.lease_expires_at)
@@ -47,9 +52,19 @@ class TaskEventTests(unittest.TestCase):
         self.now += timedelta(seconds=11)
         self.repo.recover_expired()
         events = self.history()
-        self.assertEqual([e.event_type.value for e in events], [
-            "task.created", "task.ready", "task.started", "task.requeued",
-            "task.started", "task.requeued", "task.started", "task.failed"])
+        self.assertEqual(
+            [e.event_type.value for e in events],
+            [
+                "task.created",
+                "task.ready",
+                "task.started",
+                "task.requeued",
+                "task.started",
+                "task.requeued",
+                "task.started",
+                "task.failed",
+            ],
+        )
         self.assertEqual(events[3].payload.reason, "execution_failed")
         self.assertEqual(events[5].payload.reason, "lease_expired")
         self.assertEqual(events[5].payload.worker_id, second.worker_id)
@@ -58,12 +73,14 @@ class TaskEventTests(unittest.TestCase):
 
     def test_insert_failure_rolls_back_task_and_all_events(self):
         calls = 0
+
         def fail_second(connection, lifecycle):
             nonlocal calls
             calls += 1
             if calls == 2:
                 raise sqlite3.OperationalError("injected append failure")
             return insert_event(connection, lifecycle)
+
         with patch("sentinel.storage.task_repository.insert_event", fail_second):
             with self.assertRaises(sqlite3.OperationalError):
                 self.repo.submit(self.event())
@@ -71,7 +88,10 @@ class TaskEventTests(unittest.TestCase):
         self.assertEqual(self.history(), [])
         self.repo.submit(self.event())
         before = self.repo.snapshot(), self.history()
-        with patch("sentinel.storage.task_repository.insert_event", side_effect=RuntimeError("append")):
+        with patch(
+            "sentinel.storage.task_repository.insert_event",
+            side_effect=RuntimeError("append"),
+        ):
             with self.assertRaises(RuntimeError):
                 self.repo.claim("w")
         self.assertEqual((self.repo.snapshot(), self.history()), before)

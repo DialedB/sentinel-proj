@@ -31,5 +31,6 @@ def install_demo_routes(app: FastAPI, config: ServiceConfig) -> None:
                 return _STATUS.validate_json(response.content)
         except (httpx.HTTPError, TimeoutError, ValidationError) as error:
             raise HTTPException(
-                503, "Watchdog unavailable: status could not be retrieved",
+                503,
+                "Watchdog unavailable: status could not be retrieved",
             ) from error

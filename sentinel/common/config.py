@@ -6,6 +6,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
+from sentinel.common.address import validate_host
+from sentinel.common.limits import MAX_SOURCE_LENGTH
 from sentinel.common.models import ServiceRole
 
 
@@ -41,8 +43,10 @@ class ServiceConfig:
 
     @classmethod
     def from_env(
-        cls, role: ServiceRole, environ: Mapping[str, str] | None = None,
-    ) -> "ServiceConfig":
+        cls,
+        role: ServiceRole,
+        environ: Mapping[str, str] | None = None,
+    ) -> ServiceConfig:
         env = os.environ if environ is None else environ
         if not isinstance(role, ServiceRole):
             raise ValueError("Unsupported service role")
@@ -88,10 +92,21 @@ class ServiceConfig:
         )
 
     def __post_init__(self) -> None:
-        for name in ("service_id", "host", "server_url", "main_server_id", "database_path"):
+        for name in (
+            "service_id",
+            "host",
+            "server_url",
+            "main_server_id",
+            "database_path",
+        ):
             value = getattr(self, name)
             if not isinstance(value, str) or not value.strip():
                 raise ValueError(f"{name} must be a non-empty string")
+        for name in ("service_id", "main_server_id"):
+            if len(getattr(self, name)) > MAX_SOURCE_LENGTH:
+                raise ValueError(
+                    f"{name} must be at most {MAX_SOURCE_LENGTH} characters"
+                )
         if self.database_path == ":memory:":
             raise ValueError("database_path must name a file")
         if type(self.task_max_attempts) is not int or self.task_max_attempts <= 0:
@@ -104,26 +119,38 @@ class ServiceConfig:
             value = getattr(self, name)
             if name == "advertise_host" and value is None:
                 continue
-            if (not isinstance(value, str) or not value.strip()
-                    or any(char.isspace() for char in value)
-                    or any(char in value for char in "/?#@")
-                    or "://" in value):
+            try:
+                validate_host(value)
+            except ValueError as error:
                 raise ValueError(
-                    f"{name} must be a hostname or IP address, not a URL",
-                )
+                    f"{name} must be a hostname or IP address, not a URL"
+                ) from error
         for name in (
-            "heartbeat_interval", "http_timeout", "monitor_interval",
-            "health_check_timeout", "heartbeat_timeout",
-            "event_generation_interval", "worker_poll_interval",
-            "task_lease_seconds", "recovery_interval_seconds", "event_dispatch_interval",
+            "heartbeat_interval",
+            "http_timeout",
+            "monitor_interval",
+            "health_check_timeout",
+            "heartbeat_timeout",
+            "event_generation_interval",
+            "worker_poll_interval",
+            "task_lease_seconds",
+            "recovery_interval_seconds",
+            "event_dispatch_interval",
         ):
             value = getattr(self, name)
-            if (isinstance(value, bool) or not isinstance(value, (int, float))
-                    or not math.isfinite(value) or value <= 0):
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(value)
+                or value <= 0
+            ):
                 raise ValueError(f"{name} must be a finite positive number")
-        if (isinstance(self.processing_delay, bool)
-                or not isinstance(self.processing_delay, (int, float))
-                or not math.isfinite(self.processing_delay) or self.processing_delay < 0):
+        if (
+            isinstance(self.processing_delay, bool)
+            or not isinstance(self.processing_delay, (int, float))
+            or not math.isfinite(self.processing_delay)
+            or self.processing_delay < 0
+        ):
             raise ValueError("processing_delay must be a finite nonnegative number")
         if self.health_check_strategy not in ("http", "heartbeat"):
             raise ValueError("health_check_strategy must be http or heartbeat")

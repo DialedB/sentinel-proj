@@ -16,19 +16,46 @@ from sentinel.core.factory import ProducerFactory, WorkerFactory
 
 class DeploymentTests(unittest.IsolatedAsyncioTestCase):
     def config(self):
-        return ServiceConfig.from_env(ServiceRole.WORKER, {
-            "SERVICE_ID": "worker-1", "SERVICE_HOST": "0.0.0.0",
-            "SERVICE_PORT": "8000", "SERVICE_ADVERTISE_HOST": "worker-1",
-            "MAIN_SERVER_URL": "http://main-server:8000",
-        })
+        return ServiceConfig.from_env(
+            ServiceRole.WORKER,
+            {
+                "SERVICE_ID": "worker-1",
+                "SERVICE_HOST": "0.0.0.0",
+                "SERVICE_PORT": "8000",
+                "SERVICE_ADVERTISE_HOST": "worker-1",
+                "MAIN_SERVER_URL": "http://main-server:8000",
+            },
+        )
 
     def test_defaults_validation_and_positional_compatibility(self):
-        old = ServiceConfig("w", ServiceRole.WORKER, "localhost", 8000,
-                            "http://central", 1, 2, "central", 3, 4, 5, "http")
+        old = ServiceConfig(
+            "w",
+            ServiceRole.WORKER,
+            "localhost",
+            8000,
+            "http://central",
+            1,
+            2,
+            "central",
+            3,
+            4,
+            5,
+            "http",
+        )
         self.assertIsNone(old.advertise_host)
         self.assertEqual(old.advertised_host, "localhost")
-        for invalid in ("", " ", "bad host", "http://worker-1", "w/path",
-                        "w?query", "w#fragment", "user@host", 123, False):
+        for invalid in (
+            "",
+            " ",
+            "bad host",
+            "http://worker-1",
+            "w/path",
+            "w?query",
+            "w#fragment",
+            "user@host",
+            123,
+            False,
+        ):
             with self.subTest(invalid=invalid), self.assertRaises(ValueError):
                 replace(old, advertise_host=invalid)
         for valid in ("worker-1", "127.0.0.1", "::1"):
@@ -38,15 +65,21 @@ class DeploymentTests(unittest.IsolatedAsyncioTestCase):
 
     def test_entrypoint_binds_wildcard_but_info_advertises_dns(self):
         config = self.config()
-        self.assertEqual(WorkerFactory().create_service(config).get_info().host, "worker-1")
-        with patch("sentinel.core.entrypoint.ServiceConfig.from_env", return_value=config):
+        self.assertEqual(
+            WorkerFactory().create_service(config).get_info().host, "worker-1"
+        )
+        with patch(
+            "sentinel.core.entrypoint.ServiceConfig.from_env", return_value=config
+        ):
             with patch("sentinel.core.entrypoint.uvicorn.run") as run:
                 serve(WorkerFactory(), ServiceRole.WORKER)
         self.assertEqual(run.call_args.kwargs, {"host": "0.0.0.0", "port": 8000})
 
     async def test_registration_actually_sends_advertised_dns(self):
-        for factory, role in ((WorkerFactory, ServiceRole.WORKER),
-                              (ProducerFactory, ServiceRole.PRODUCER)):
+        for factory, role in (
+            (WorkerFactory, ServiceRole.WORKER),
+            (ProducerFactory, ServiceRole.PRODUCER),
+        ):
             sent = asyncio.Event()
             payloads = []
 
@@ -56,13 +89,26 @@ class DeploymentTests(unittest.IsolatedAsyncioTestCase):
                 sent.set()
                 return httpx.Response(200)
 
-            client = httpx.AsyncClient(transport=httpx.MockTransport(respond),
-                                       base_url="http://main-server:8000/")
+            client = httpx.AsyncClient(
+                transport=httpx.MockTransport(respond),
+                base_url="http://main-server:8000/",
+            )
             service = factory().create_service(replace(self.config(), role=role))
             app = service.create_app()
-            with patch("sentinel.common.http_client.httpx.AsyncClient", return_value=client):
+            with patch(
+                "sentinel.common.http_client.httpx.AsyncClient", return_value=client
+            ):
                 async with app.router.lifespan_context(app):
                     await asyncio.wait_for(sent.wait(), 1)
-            self.assertEqual(payloads, [{"service_id": "worker-1", "role": role.value,
-                                        "host": "worker-1", "port": 8000}])
+            self.assertEqual(
+                payloads,
+                [
+                    {
+                        "service_id": "worker-1",
+                        "role": role.value,
+                        "host": "worker-1",
+                        "port": 8000,
+                    }
+                ],
+            )
             self.assertTrue(client.is_closed)

@@ -3,7 +3,7 @@
 import asyncio
 import unittest
 from dataclasses import FrozenInstanceError, replace
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 from unittest.mock import AsyncMock, patch
 
 import httpx
@@ -20,18 +20,29 @@ from sentinel.watchdog.strategies import (
 
 
 def config() -> ServiceConfig:
-    return ServiceConfig("watchdog-1", ServiceRole.WATCHDOG, "127.0.0.1", 8005,
-                         "http://central", monitor_interval=0.01)
+    return ServiceConfig(
+        "watchdog-1",
+        ServiceRole.WATCHDOG,
+        "127.0.0.1",
+        8005,
+        "http://central",
+        monitor_interval=0.01,
+    )
 
 
 class MonitorTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
-        self.records = [{
-            "service_id": "w", "role": "worker", "host": "worker", "port": 80,
-            "status": "healthy",
-            "registered_at": datetime.now(timezone.utc).isoformat(),
-            "last_seen": datetime.now(timezone.utc).isoformat(),
-        }]
+        self.records = [
+            {
+                "service_id": "w",
+                "role": "worker",
+                "host": "worker",
+                "port": 80,
+                "status": "healthy",
+                "registered_at": datetime.now(UTC).isoformat(),
+                "last_seen": datetime.now(UTC).isoformat(),
+            }
+        ]
         self.discovery_code = 200
         self.worker_healthy = True
         self.requests = []
@@ -49,18 +60,19 @@ class MonitorTests(unittest.IsolatedAsyncioTestCase):
                     "status": "healthy",
                 },
             )
+
         self.client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
         self.monitor = ServiceMonitor(
-            config(), self.client, HTTPHealthCheckStrategy(self.client),
+            config(),
+            self.client,
+            HTTPHealthCheckStrategy(self.client),
         )
 
     async def asyncTearDown(self) -> None:
         await self.client.aclose()
 
     def result(self, key: str) -> CheckResult:
-        return next(
-            row for row in self.monitor.snapshot() if row.service_id == key
-        )
+        return next(row for row in self.monitor.snapshot() if row.service_id == key)
 
     async def test_transitions_snapshots_missing_and_outage(self) -> None:
         self.assertIsNone(self.result("server-1").status)
@@ -74,7 +86,8 @@ class MonitorTests(unittest.IsolatedAsyncioTestCase):
         await self.monitor.check_once()
         self.assertEqual(self.result("w").status, ServiceStatus.UNHEALTHY)
         self.assertEqual(
-            self.result("w").last_successful, first.last_successful,
+            self.result("w").last_successful,
+            first.last_successful,
         )
         self.assertEqual(first.status, ServiceStatus.HEALTHY)
         self.worker_healthy = True
@@ -86,7 +99,8 @@ class MonitorTests(unittest.IsolatedAsyncioTestCase):
         with self.assertLogs("sentinel.watchdog.monitor", level="ERROR"):
             await self.monitor.check_once()
         self.assertEqual(
-            self.result("server-1").status, ServiceStatus.UNHEALTHY,
+            self.result("server-1").status,
+            ServiceStatus.UNHEALTHY,
         )
         self.assertFalse(self.result("server-1").discoverable)
         self.assertEqual(self.result("w").status, ServiceStatus.HEALTHY)
@@ -100,28 +114,37 @@ class MonitorTests(unittest.IsolatedAsyncioTestCase):
         self.worker_healthy = False
         with self.assertLogs(logger, level="INFO") as captured:
             await self.monitor.check_once()
-        self.assertEqual(captured.output, [
-            f"INFO:{logger}:[WATCHDOG] server-1 UNCHECKED -> HEALTHY",
-            f"INFO:{logger}:[WATCHDOG] w UNCHECKED -> UNHEALTHY",
-        ])
+        self.assertEqual(
+            captured.output,
+            [
+                f"INFO:{logger}:[WATCHDOG] server-1 UNCHECKED -> HEALTHY",
+                f"INFO:{logger}:[WATCHDOG] w UNCHECKED -> UNHEALTHY",
+            ],
+        )
         with self.assertNoLogs(logger, level="INFO"):
             await self.monitor.check_once()
 
         self.worker_healthy = True
         with self.assertLogs(logger, level="INFO") as captured:
             await self.monitor.check_once()
-        self.assertEqual(captured.output, [
-            f"INFO:{logger}:[WATCHDOG] w UNHEALTHY -> HEALTHY",
-        ])
+        self.assertEqual(
+            captured.output,
+            [
+                f"INFO:{logger}:[WATCHDOG] w UNHEALTHY -> HEALTHY",
+            ],
+        )
         with self.assertNoLogs(logger, level="INFO"):
             await self.monitor.check_once()
 
         self.worker_healthy = False
         with self.assertLogs(logger, level="INFO") as captured:
             await self.monitor.check_once()
-        self.assertEqual(captured.output, [
-            f"INFO:{logger}:[WATCHDOG] w HEALTHY -> UNHEALTHY",
-        ])
+        self.assertEqual(
+            captured.output,
+            [
+                f"INFO:{logger}:[WATCHDOG] w HEALTHY -> UNHEALTHY",
+            ],
+        )
         with self.assertNoLogs(logger, level="INFO"):
             await self.monitor.check_once()
 
@@ -131,21 +154,26 @@ class MonitorTests(unittest.IsolatedAsyncioTestCase):
         self.discovery_code = 503
         with self.assertLogs(logger, level="INFO") as captured:
             await self.monitor.check_once()
-        self.assertEqual([
-            record.getMessage() for record in captured.records
-            if record.levelname == "INFO"
-        ], ["[WATCHDOG] server-1 HEALTHY -> UNHEALTHY"])
+        self.assertEqual(
+            [
+                record.getMessage()
+                for record in captured.records
+                if record.levelname == "INFO"
+            ],
+            ["[WATCHDOG] server-1 HEALTHY -> UNHEALTHY"],
+        )
         with self.assertLogs(logger, level="INFO") as captured:
             await self.monitor.check_once()
-        self.assertFalse(any(
-            record.levelname == "INFO" for record in captured.records
-        ))
+        self.assertFalse(any(record.levelname == "INFO" for record in captured.records))
         self.discovery_code = 200
         with self.assertLogs(logger, level="INFO") as captured:
             await self.monitor.check_once()
-        self.assertEqual(captured.output, [
-            f"INFO:{logger}:[WATCHDOG] server-1 UNHEALTHY -> HEALTHY",
-        ])
+        self.assertEqual(
+            captured.output,
+            [
+                f"INFO:{logger}:[WATCHDOG] server-1 UNHEALTHY -> HEALTHY",
+            ],
+        )
 
     async def test_heartbeat_still_http_checks_central(self) -> None:
         self.monitor.strategy = HeartbeatHealthCheckStrategy()
@@ -181,7 +209,8 @@ class MonitorTests(unittest.IsolatedAsyncioTestCase):
                 await self.monitor.check_once()
             self.assertEqual(self.result("w").status, ServiceStatus.HEALTHY)
             self.assertEqual(
-                self.monitor.services["server-1"].address, "http://central",
+                self.monitor.services["server-1"].address,
+                "http://central",
             )
 
 
@@ -198,6 +227,7 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.Event().wait()
             finally:
                 cancelled.set()
+
         with patch.object(ServiceMonitor, "run", blocked):
             async with app.router.lifespan_context(app):
                 await started.wait()
@@ -211,10 +241,12 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
                     rows = (await api.get("/status")).json()
                     self.assertIsNone(rows[0]["status"])
                     self.assertEqual(
-                        (await api.get("/status/server-1")).json(), rows[0],
+                        (await api.get("/status/server-1")).json(),
+                        rows[0],
                     )
                     self.assertEqual(
-                        (await api.get("/status/missing")).status_code, 404,
+                        (await api.get("/status/missing")).status_code,
+                        404,
                     )
             self.assertTrue(cancelled.is_set())
             self.assertTrue(client.is_closed)
@@ -224,14 +256,27 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
 class ConfigurationTests(unittest.TestCase):
     def test_defaults_and_environment(self) -> None:
         value = ServiceConfig.from_env(ServiceRole.WATCHDOG, {})
-        self.assertEqual((value.host, value.port, value.monitor_interval,
-                          value.health_check_timeout, value.heartbeat_timeout,
-                          value.health_check_strategy, value.main_server_id),
-                         ("127.0.0.1", 8005, 5, 2, 15, "http", "server-1"))
-        env = {"WATCHDOG_HOST": "localhost", "WATCHDOG_PORT": "8015",
-               "MONITOR_INTERVAL": "1", "HEALTH_CHECK_TIMEOUT": "0.5",
-               "HEARTBEAT_TIMEOUT": "3", "HEALTH_CHECK_STRATEGY": "heartbeat",
-               "MAIN_SERVER_ID": "central"}
+        self.assertEqual(
+            (
+                value.host,
+                value.port,
+                value.monitor_interval,
+                value.health_check_timeout,
+                value.heartbeat_timeout,
+                value.health_check_strategy,
+                value.main_server_id,
+            ),
+            ("127.0.0.1", 8005, 5, 2, 15, "http", "server-1"),
+        )
+        env = {
+            "WATCHDOG_HOST": "localhost",
+            "WATCHDOG_PORT": "8015",
+            "MONITOR_INTERVAL": "1",
+            "HEALTH_CHECK_TIMEOUT": "0.5",
+            "HEARTBEAT_TIMEOUT": "3",
+            "HEALTH_CHECK_STRATEGY": "heartbeat",
+            "MAIN_SERVER_ID": "central",
+        }
         value = ServiceConfig.from_env(ServiceRole.WATCHDOG, env)
         self.assertEqual(
             (value.host, value.port, value.main_server_id),
@@ -239,10 +284,19 @@ class ConfigurationTests(unittest.TestCase):
         )
         self.assertEqual(value.health_check_strategy, "heartbeat")
         for name in (
-            "monitor_interval", "health_check_timeout", "heartbeat_timeout",
+            "monitor_interval",
+            "health_check_timeout",
+            "heartbeat_timeout",
         ):
             for invalid in (
-                True, False, 0, -1, float("nan"), float("inf"), "2", None,
+                True,
+                False,
+                0,
+                -1,
+                float("nan"),
+                float("inf"),
+                "2",
+                None,
             ):
                 with self.subTest(name=name, invalid=invalid):
                     with self.assertRaises(ValueError):
@@ -254,5 +308,6 @@ class ConfigurationTests(unittest.TestCase):
             replace(config(), main_server_id=" ")
         with self.assertRaises(ValueError):
             ServiceConfig.from_env(
-                ServiceRole.WATCHDOG, {"SERVICE_ROLE": "worker"},
+                ServiceRole.WATCHDOG,
+                {"SERVICE_ROLE": "worker"},
             )

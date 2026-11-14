@@ -103,9 +103,9 @@ def exercise(timeout: float = 35, base_port: int = 18760) -> None:
             error = None
             while time.monotonic() < deadline:
                 try:
-                    assert all(
-                        p.poll() is None for p in children
-                    ), "Child exited unexpectedly"
+                    assert all(p.poll() is None for p in children), (
+                        "Child exited unexpectedly"
+                    )
                     for offset, (identity, _) in enumerate(entries):
                         health = get(base_port + offset, "/health")
                         assert (

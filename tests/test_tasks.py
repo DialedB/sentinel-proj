@@ -68,8 +68,9 @@ class DomainTests(unittest.TestCase):
         ]:
             data = first.model_dump()
             data[field] = value
-            with self.subTest(field=field, value=value), self.assertRaises(
-                ValidationError
+            with (
+                self.subTest(field=field, value=value),
+                self.assertRaises(ValidationError),
             ):
                 SecurityEvent.model_validate(data)
         data = first.model_dump()
@@ -86,7 +87,11 @@ class DomainTests(unittest.TestCase):
             running.finish(success(running, "other"))
         complete = running.finish(success(running))
         failed = running.finish(
-            TaskResult(worker_id="w", lease_token=running.lease_token, outcome=Failure(status="failure", error="bad"))
+            TaskResult(
+                worker_id="w",
+                lease_token=running.lease_token,
+                outcome=Failure(status="failure", error="bad"),
+            )
         )
         self.assertEqual(complete.state, TaskState.COMPLETED)
         self.assertEqual(failed.state, TaskState.FAILED)
@@ -243,7 +248,10 @@ class QueueTests(unittest.TestCase):
                 completed=1,
                 failed=0,
                 queue_depth=0,
-                attempts=2, retry_attempts=0, recovery_count=0, expired_active=0,
+                attempts=2,
+                retry_attempts=0,
+                recovery_count=0,
+                expired_active=0,
             ),
         )
         snapshot = q.snapshot()
@@ -274,8 +282,14 @@ class TaskAPITests(unittest.TestCase):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         self.service = ServerService(
-            ServiceConfig("s", ServiceRole.SERVER, "localhost", 8000, "http://central",
-                          database_path=str(Path(directory.name) / "tasks.db"))
+            ServiceConfig(
+                "s",
+                ServiceRole.SERVER,
+                "localhost",
+                8000,
+                "http://central",
+                database_path=str(Path(directory.name) / "tasks.db"),
+            )
         )
         self.client = TestClient(self.service.create_app())
         self.client.__enter__()

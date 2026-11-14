@@ -29,7 +29,7 @@ def eventually(check, timeout=10):
             result = check()
             if result:
                 return result
-        except (URLError, TimeoutError, ConnectionError):
+        except URLError, TimeoutError, ConnectionError:
             pass
         time.sleep(0.05)
     raise AssertionError("Smoke check did not succeed before its deadline")
@@ -42,16 +42,28 @@ def main():
             probe.bind(("127.0.0.1", port))
     processes = []
     with tempfile.TemporaryDirectory(prefix="sentinel-smoke-") as directory:
+
         def start(role, generation=""):
             log = open(Path(directory) / f"{role}{generation}.log", "w+")
-            env = {**os.environ, "DATABASE_PATH": str(Path(directory) / "tasks.db"), "SERVICE_ID": f"smoke-{role}", "SERVICE_ROLE": role,
-                   "SERVICE_HOST": "127.0.0.1", "SERVICE_PORT": str({"server": 8000,
-                   "producer": 8001, "worker": 8002}[role]),
-                   "MAIN_SERVER_URL": "http://127.0.0.1:8000",
-                   "HEARTBEAT_INTERVAL": "0.2", "HTTP_TIMEOUT": "0.3"}
+            env = {
+                **os.environ,
+                "DATABASE_PATH": str(Path(directory) / "tasks.db"),
+                "SERVICE_ID": f"smoke-{role}",
+                "SERVICE_ROLE": role,
+                "SERVICE_HOST": "127.0.0.1",
+                "SERVICE_PORT": str(
+                    {"server": 8000, "producer": 8001, "worker": 8002}[role]
+                ),
+                "MAIN_SERVER_URL": "http://127.0.0.1:8000",
+                "HEARTBEAT_INTERVAL": "0.2",
+                "HTTP_TIMEOUT": "0.3",
+            }
             process = subprocess.Popen(
-                [sys.executable, "-m", f"sentinel.{role}.main"], cwd=ROOT,
-                env=env, stdout=log, stderr=subprocess.STDOUT,
+                [sys.executable, "-m", f"sentinel.{role}.main"],
+                cwd=ROOT,
+                env=env,
+                stdout=log,
+                stderr=subprocess.STDOUT,
             )
             entry = (role + generation, process, log)
             processes.append(entry)
@@ -79,18 +91,24 @@ def main():
             return output
 
         try:
-            producer = start("producer")
-            worker = start("worker")
+            start("producer")
+            start("worker")
             for role, port in (("producer", 8001), ("worker", 8002)):
                 health = eventually(lambda: get(port, "/health"))
-                assert health == {"service_id": f"smoke-{role}", "role": role,
-                                  "status": "healthy"}, health
+                assert health == {
+                    "service_id": f"smoke-{role}",
+                    "role": role,
+                    "status": "healthy",
+                }, health
                 print(f"{role} health while central offline: {health}")
             time.sleep(0.3)
             central = start("server")
             health = eventually(lambda: get(8000, "/health"))
-            assert health == {"service_id": "smoke-server", "role": "server",
-                              "status": "healthy"}, health
+            assert health == {
+                "service_id": "smoke-server",
+                "role": "server",
+                "status": "healthy",
+            }, health
             print(f"server health: {health}")
 
             def registered():
@@ -98,20 +116,29 @@ def main():
                 return records if len(records) == 2 else None
 
             first = eventually(registered)
-            assert {row["service_id"] for row in first} == {"smoke-producer", "smoke-worker"}
-            before = {row["service_id"]: datetime.fromisoformat(row["last_seen"])
-                      for row in first}
+            assert {row["service_id"] for row in first} == {
+                "smoke-producer",
+                "smoke-worker",
+            }
+            before = {
+                row["service_id"]: datetime.fromisoformat(row["last_seen"])
+                for row in first
+            }
 
             def advanced():
                 rows = registered()
-                if rows and all(datetime.fromisoformat(row["last_seen"]) >
-                                before[row["service_id"]] for row in rows):
+                if rows and all(
+                    datetime.fromisoformat(row["last_seen"]) > before[row["service_id"]]
+                    for row in rows
+                ):
                     return rows
                 return None
 
             after = eventually(advanced)
             for row in after:
-                print(f"{row['service_id']} last_seen: {before[row['service_id']].isoformat()} -> {row['last_seen']}")
+                print(
+                    f"{row['service_id']} last_seen: {before[row['service_id']].isoformat()} -> {row['last_seen']}"
+                )
             stop(central)
             central = start("server", "-restart")
             recovered = eventually(registered)
@@ -124,14 +151,18 @@ def main():
                     output = stop(entry)
                     if entry[0] in ("producer", "worker"):
                         assert "Registration failed" in output, output
-                        print(f"{entry[0]}: startup registration failure and recovery logged")
+                        print(
+                            f"{entry[0]}: startup registration failure and recovery logged"
+                        )
                 except Exception as error:
                     errors.append(error)
                 finally:
                     entry[2].close()
             if errors:
                 raise AssertionError(errors)
-    print("PASS: independent processes, retries, health, advancing heartbeats, restart, clean shutdown")
+    print(
+        "PASS: independent processes, retries, health, advancing heartbeats, restart, clean shutdown"
+    )
 
 
 if __name__ == "__main__":

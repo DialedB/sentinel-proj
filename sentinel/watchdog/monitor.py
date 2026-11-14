@@ -3,7 +3,7 @@
 import asyncio
 import logging
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 from urllib.parse import urlunsplit
 
 import httpx
@@ -32,10 +32,13 @@ class ServiceMonitor:
         self.client = client
         self.strategy = strategy
         self.central_strategy = HTTPHealthCheckStrategy(
-            client, config.health_check_timeout,
+            client,
+            config.health_check_timeout,
         )
         central = MonitoredService(
-            config.main_server_id, ServiceRole.SERVER, config.server_url,
+            config.main_server_id,
+            ServiceRole.SERVER,
+            config.server_url,
         )
         self.services = {central.service_id: central}
         self._results = {
@@ -62,13 +65,17 @@ class ServiceMonitor:
         for service_id, result in self._results.items():
             self._results[service_id] = replace(result, discoverable=False)
         self._results[self.config.main_server_id] = replace(
-            self._results[self.config.main_server_id], discoverable=True,
+            self._results[self.config.main_server_id],
+            discoverable=True,
         )
         for record in records:
             host = f"[{record.host}]" if ":" in record.host else record.host
             address = urlunsplit(("http", f"{host}:{record.port}", "", "", ""))
             service = MonitoredService(
-                record.service_id, record.role, address, record.last_seen,
+                record.service_id,
+                record.role,
+                address,
+                record.last_seen,
             )
             self.services[service.service_id] = service
             previous_result = self._results.get(
@@ -76,7 +83,9 @@ class ServiceMonitor:
                 CheckResult(service.service_id, service.role),
             )
             self._results[service.service_id] = replace(
-                previous_result, role=service.role, discoverable=True,
+                previous_result,
+                role=service.role,
+                discoverable=True,
             )
 
     async def check_once(self) -> None:
@@ -93,7 +102,8 @@ class ServiceMonitor:
             try:
                 strategy = (
                     self.central_strategy
-                    if service_id == self.config.main_server_id else self.strategy
+                    if service_id == self.config.main_server_id
+                    else self.strategy
                 )
                 healthy = await strategy.check(service)
                 if not healthy:
@@ -105,24 +115,27 @@ class ServiceMonitor:
             if service_id == self.config.main_server_id and discovery_error:
                 healthy = False
                 error_message = discovery_error
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             previous_result = self._results[service_id]
-            status = (
-                ServiceStatus.HEALTHY if healthy else ServiceStatus.UNHEALTHY
-            )
+            status = ServiceStatus.HEALTHY if healthy else ServiceStatus.UNHEALTHY
             self._results[service_id] = replace(
-                previous_result, status=status, last_checked=now,
+                previous_result,
+                status=status,
+                last_checked=now,
                 last_successful=now if healthy else previous_result.last_successful,
                 error=error_message,
             )
             if previous_result.status is not status:
                 previous_status = (
                     previous_result.status.name
-                    if previous_result.status is not None else "UNCHECKED"
+                    if previous_result.status is not None
+                    else "UNCHECKED"
                 )
                 logger.info(
                     "[WATCHDOG] %s %s -> %s",
-                    service_id, previous_status, status.name,
+                    service_id,
+                    previous_status,
+                    status.name,
                 )
 
     async def run(self) -> None:

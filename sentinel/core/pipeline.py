@@ -7,17 +7,26 @@ import httpx
 from pydantic import ValidationError
 
 from sentinel.common.config import ServiceConfig
-from sentinel.common.http_client import ServiceHTTPClient
+from sentinel.common.errors import DomainError
+from sentinel.common.gateway import ServiceGateway
 from sentinel.common.models import ServiceRole
 from sentinel.common.tasks import Failure, SecurityEvent, Success, Task, TaskResult
-from sentinel.producer.generator import SecurityEventGenerator
+from sentinel.core.analysis_factory import (
+    AnalysisComponentFactory,
+    SyntheticSecurityFactory,
+)
 from sentinel.worker.executor import WorkerExecutor
 
 logger = logging.getLogger(__name__)
 
 
-async def produce(config: ServiceConfig, client: ServiceHTTPClient) -> None:
-    generator = SecurityEventGenerator(config.service_id)
+async def produce(
+    config: ServiceConfig,
+    client: ServiceGateway,
+    factory: AnalysisComponentFactory | None = None,
+) -> None:
+    factory = factory if factory is not None else SyntheticSecurityFactory()
+    generator = factory.create_generator(config.service_id)
     pending: SecurityEvent | None = None
     while True:
         if pending is None:
@@ -28,15 +37,19 @@ async def produce(config: ServiceConfig, client: ServiceHTTPClient) -> None:
                 "Submitted event=%s producer=%s", pending.event_id, config.service_id
             )
             pending = None
-        except (httpx.HTTPError, ValidationError) as error:
+        except (DomainError, httpx.HTTPError, ValidationError) as error:
             logger.warning(
                 "Event submission failed producer=%s: %s", config.service_id, error
             )
         await asyncio.sleep(config.event_generation_interval)
 
 
-async def work(config: ServiceConfig, client: ServiceHTTPClient) -> None:
-    executor = WorkerExecutor()
+async def work(
+    config: ServiceConfig,
+    client: ServiceGateway,
+    factory: AnalysisComponentFactory | None = None,
+) -> None:
+    executor = WorkerExecutor(factory)
     pending: TaskResult | None = None
     task: Task | None = None
     while True:
@@ -58,8 +71,12 @@ async def work(config: ServiceConfig, client: ServiceHTTPClient) -> None:
                         outcome = Failure(
                             status="failure", error=str(error) or type(error).__name__
                         )
+                    assert (
+                        task.lease_token is not None
+                    )  # Guaranteed by a successful claim.
                     pending = TaskResult(
-                        worker_id=config.service_id, lease_token=task.lease_token,
+                        worker_id=config.service_id,
+                        lease_token=task.lease_token,
                         outcome=outcome,
                     )
             if pending is not None:
@@ -69,10 +86,11 @@ async def work(config: ServiceConfig, client: ServiceHTTPClient) -> None:
                     "Acknowledged task=%s worker=%s", task.task_id, config.service_id
                 )
                 pending = None
-        except httpx.HTTPStatusError as error:
+        except DomainError as error:
             # A lost acknowledgement yields 409; central restart can yield 404.
             # Neither is a reason to execute again or to block this worker forever.
-            if pending is not None and error.response.status_code in (404, 409):
+            if pending is not None and error.status in (404, 409):
+                assert task is not None
                 logger.warning(
                     "Discarding stale or unacknowledged result task=%s: %s",
                     task.task_id,
@@ -81,7 +99,7 @@ async def work(config: ServiceConfig, client: ServiceHTTPClient) -> None:
                 pending = None
             else:
                 logger.warning(
-                    "Worker HTTP failure worker=%s: %s", config.service_id, error
+                    "Worker application failure worker=%s: %s", config.service_id, error
                 )
         except (httpx.HTTPError, ValidationError) as error:
             logger.warning(
@@ -92,7 +110,7 @@ async def work(config: ServiceConfig, client: ServiceHTTPClient) -> None:
 
 async def run_pipeline(
     config: ServiceConfig,
-    client: ServiceHTTPClient,
+    client: ServiceGateway,
     registered: asyncio.Event,
 ) -> None:
     await registered.wait()

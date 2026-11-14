@@ -18,7 +18,9 @@ class AuditSubscriber(EventSubscriber):
 
     async def handle(self, event: TaskLifecycleEvent) -> None:
         serialized = event.model_dump_json()
-        if await storage_call(lambda: self.projections.receipt(event.event_id, self.subscriber_id)):
+        if await storage_call(
+            lambda: self.projections.receipt(event.event_id, self.subscriber_id)
+        ):
             # A crash after receipt commit can lose this line. SQLite and a log
             # sink cannot commit atomically; do not advertise exactly-once logs.
             logger.info("%s", serialized)

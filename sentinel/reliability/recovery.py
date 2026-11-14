@@ -4,15 +4,14 @@ import asyncio
 import logging
 import sqlite3
 from collections.abc import Callable
-from typing import TypeVar
+
 
 from sentinel.storage.task_repository import TaskRepository
 
 logger = logging.getLogger(__name__)
-T = TypeVar("T")
 
 
-async def storage_call(call: Callable[[], T]) -> T:
+async def storage_call[T](call: Callable[[], T]) -> T:
     operation = asyncio.create_task(asyncio.to_thread(call))
     try:
         return await asyncio.shield(operation)
