@@ -1,0 +1,17 @@
+[tool.coverage.run]
+branch = true
+source = ["sentinel"]
+
+[tool.coverage.report]
+show_missing = true
+fail_under = 100
+# Abstract contracts have no executable implementation; all concrete code is measured.
+exclude_also = ["@abstractmethod"]
+
+[tool.ruff]
+target-version = "py314"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "UP"]
+# Keep existing Enum string behavior; changing to StrEnum is not just formatting.
+ignore = ["UP042"]
