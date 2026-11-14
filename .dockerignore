@@ -1,9 +1,11 @@
 .git
-.venv
+.venv*
 venv
 **/__pycache__
 **/*.py[cod]
 .pytest_cache
+.ruff_cache
+coverage.xml
 .coverage
 htmlcov
 .DS_Store
